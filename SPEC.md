@@ -209,13 +209,30 @@ dépôt porte le code et l'orchestration ; le calcul tourne sur un **runner auto
 | 3 | `prepare --source dpe` | ✅ |
 | 4 | `prepare --source bdnb` | ✅ |
 | 5 | `publish` — Releases, manifeste, DDL | ✅ |
-| 6 | Contrôles qualité **bloquants** | à faire |
+| 6 | Contrôles qualité **bloquants** | ✅ |
 | 7 | En option : le jeu joint (§2.3) | à décider |
 
-**Phase 6, la plus importante.** Comptes par département, distributions, taux de géolocalisation,
-écart au millésime précédent. **Une régression bloque la publication.** C'est la contrepartie
-indispensable de l'automatisation : sans ce garde-fou, la chaîne publierait ses propres erreurs à
-heure fixe, avec l'autorité d'un jeu de référence.
+**Phase 6, la plus importante.** `verify` passe chaque jeu au crible et sort en code 1 si un contrôle
+bloque ; `publish` refuse de partir dans ce cas. C'est la contrepartie indispensable de
+l'automatisation : sans ce garde-fou, la chaîne publierait ses propres erreurs à heure fixe, avec
+l'autorité d'un jeu de référence.
+
+Trois familles de contrôles :
+
+- **Volume** — un département vide bloque, sauf là où l'absence est attendue : le Bas-Rhin, le
+  Haut-Rhin, la Moselle et Mayotte sont hors DVF (livre foncier). Confondre cette absence avec une
+  panne ferait bloquer une publication valide tous les mois, pour toujours.
+- **Emprise géographique** — chaque territoire a la sienne. C'est le contrôle qui aurait attrapé
+  seul le `_geopoint` de l'ADEME, sans qu'aucun humain ait à regarder une carte. Éprouvé sur les
+  données réelles : sur les coordonnées telles que l'ADEME les publie pour La Réunion, il rend
+  *« 100 % des points hors du territoire — reprojection probablement fausse »* et refuse la
+  publication. Quelques points isolés donnent un simple avertissement : une saisie erronée n'est
+  pas une reprojection ratée.
+- **Régression** — comparaison au millésime précédent, lue dans son manifeste publié. Une perte de
+  plus de 20 % des lignes bloque : c'est un problème amont, pas une évolution.
+
+La référence vient du **manifeste de la Release précédente**, pas d'un fichier d'état local : un
+manifeste dit ce qui a réellement été publié et ne peut pas diverger de la réalité.
 
 ---
 

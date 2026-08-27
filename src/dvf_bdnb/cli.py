@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from dvf_bdnb import fetch, publish as publisher, sources as registry
+from dvf_bdnb import fetch, publish as publisher, quality, sources as registry
 from dvf_bdnb.prepare import bdnb as prepare_bdnb, dpe as prepare_dpe, dvf as prepare_dvf
 from dvf_bdnb.state import State, SourceState
 
@@ -168,17 +168,91 @@ def prepare(
 
 
 @app.command()
+def verify(
+    out: Path = typer.Option(Path("out"), help="Repertoire contenant les jeux prepares."),
+    baseline: Path = typer.Option(None, help="Manifeste du millesime precedent, pour la comparaison."),
+) -> None:
+    """Passe les jeux prepares au crible avant publication.
+
+    Code de sortie 1 si un controle bloque : de quoi arreter une chaine
+    automatique avant qu'elle ne publie un jeu faux.
+    """
+    reference = {}
+    if baseline and baseline.exists():
+        reference = quality.baseline_from_manifest(json.loads(baseline.read_text(encoding="utf-8")))
+
+    findings = []
+    for parquet, source, dept in _iter_datasets(out):
+        rapport = quality.check_dataset(
+            parquet, source, dept, baseline=reference.get(f"{source}/{dept}")
+        )
+        findings.extend(rapport.findings)
+
+    if not findings:
+        typer.secho("aucun jeu a verifier", fg=typer.colors.RED)
+        raise typer.Exit(2)
+
+    bloquants = 0
+    for finding in findings:
+        couleur = {
+            quality.Level.OK: typer.colors.GREEN,
+            quality.Level.WARN: typer.colors.YELLOW,
+            quality.Level.FAIL: typer.colors.RED,
+        }[finding.level]
+        typer.secho(str(finding), fg=couleur)
+        bloquants += finding.level is quality.Level.FAIL
+
+    typer.echo("")
+    if bloquants:
+        typer.secho(
+            f"{bloquants} controle(s) bloquant(s) — publication refusee. "
+            "Mieux vaut ne rien publier qu'un jeu faux.",
+            fg=typer.colors.RED, bold=True,
+        )
+        raise typer.Exit(1)
+
+    typer.secho("tous les controles passent.", fg=typer.colors.GREEN, bold=True)
+
+
+def _iter_datasets(out: Path):
+    """Parcourt les Parquet produits, en deduisant source et departement."""
+    for directory in sorted(p for p in out.iterdir() if p.is_dir() and p.name != "schema"):
+        for parquet in sorted(directory.glob("*.parquet")):
+            dept = parquet.stem.removeprefix("dept-")
+            yield parquet, directory.name, dept
+
+
+@app.command()
 def publish(
     millesime: str = typer.Option(..., help="Identifiant du millesime, ex. 2026-02-a."),
     out: Path = typer.Option(Path("out"), help="Repertoire contenant les jeux prepares."),
     source: str = typer.Option(None, help="Ne publier qu'une source."),
     repo: str = typer.Option("cldt-fr/dvf-bdnb-ademe", help="Depot GitHub cible."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Tout preparer sans rien envoyer."),
+    skip_checks: bool = typer.Option(False, "--skip-checks", help="Publier malgre un controle bloquant."),
 ) -> None:
     """Decline les jeux prepares en CSV + DDL, et les publie en Release."""
     if not out.exists():
         typer.secho(f"rien a publier : {out} n'existe pas", fg=typer.colors.RED)
         raise typer.Exit(2)
+
+    # Les controles precedent la publication, jamais l'inverse : une chaine
+    # automatique doit s'arreter AVANT d'avoir publie, pas apres.
+    if not skip_checks:
+        bloquants = []
+        for parquet, src, dept in _iter_datasets(out):
+            if source and src != source:
+                continue
+            bloquants.extend(quality.check_dataset(parquet, src, dept).blocking)
+        if bloquants:
+            for finding in bloquants:
+                typer.secho(str(finding), fg=typer.colors.RED)
+            typer.secho(
+                "publication refusee. Relancer `verify` pour le detail, ou forcer "
+                "avec --skip-checks en connaissance de cause.",
+                fg=typer.colors.RED, bold=True,
+            )
+            raise typer.Exit(1)
 
     sources = [source] if source else None
     bundles = publisher.build(out, millesime, sources)
