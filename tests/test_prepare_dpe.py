@@ -125,3 +125,35 @@ def _prepared(tmp_path: Path, sources: list[dict], departement: str) -> Path:
     destination = tmp_path / "out.parquet"
     dpe.prepare(sources, departement, destination)
     return destination
+
+
+def test_les_pages_partent_sur_disque_au_fil_de_l_eau(tmp_path: Path) -> None:
+    """Paris compte 837 000 diagnostics.
+
+    Les accumuler en mémoire avant d'écrire ferait plusieurs gigaoctets
+    d'objets Python — de quoi mettre à genoux une petite machine
+    d'intégration. Chaque page part donc sur disque dès qu'elle arrive.
+    """
+    scratch = tmp_path / "pages"
+    pages = [
+        [ligne(numero_dpe=f"P{i}", etiquette_dpe="C", date_etablissement_dpe="2024-01-01",
+               code_departement_ban="75")]
+        for i in range(4)
+    ]
+    destination = tmp_path / "out.parquet"
+    rapport = dpe.prepare_stream(iter(pages), "75", destination, scratch=scratch)
+
+    assert rapport["diagnostics"] == 4
+    # Une page, un fichier : la mémoire ne garde jamais l'ensemble.
+    assert len(list(scratch.glob("p*.parquet"))) == 4
+
+
+def test_un_territoire_inconnu_leve_avant_tout_telechargement(tmp_path: Path) -> None:
+    """Sinon on paye une heure de pagination pour finir sur une erreur."""
+
+    def pages_qui_ne_doivent_pas_etre_lues():
+        raise AssertionError("les pages n'auraient pas du etre consommees")
+        yield  # pragma: no cover
+
+    with pytest.raises(ValueError, match="inconnu"):
+        dpe.prepare_stream(pages_qui_ne_doivent_pas_etre_lues(), "999", tmp_path / "o.parquet")

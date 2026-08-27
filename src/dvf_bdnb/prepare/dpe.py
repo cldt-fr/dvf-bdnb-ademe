@@ -19,6 +19,7 @@ Ce qui est fait ici, et pourquoi :
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import duckdb
@@ -98,22 +99,78 @@ def srid_for(department: str) -> int:
     )
 
 
+def prepare_stream(
+    pages: Iterable[list[dict]],
+    department: str,
+    destination: Path,
+    *,
+    scratch: Path | None = None,
+    connection: duckdb.DuckDBPyConnection | None = None,
+) -> dict:
+    """Prepare un territoire en consommant les pages au fil de l'eau.
+
+    Chaque page part sur disque des qu'elle arrive, plutot que de s'accumuler en
+    memoire : Paris compte 837 000 diagnostics, et les garder tous ferait
+    plusieurs gigaoctets d'objets Python.
+    """
+    import shutil
+    import tempfile
+
+    srid = srid_for(department)  # leve tot si le territoire est inconnu
+    scratch_dir = Path(scratch or tempfile.mkdtemp(prefix=f"dpe-{department}-"))
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    con = connection or duckdb.connect()
+    total = 0
+    try:
+        for index, page in enumerate(pages):
+            if not page:
+                continue
+            total += len(page)
+            table = _to_arrow([
+                {c: (None if row.get(c) is None else str(row[c])) for c in COLUMNS}
+                for row in page
+            ])
+            con.register("page", table)
+            con.execute(
+                f"COPY (SELECT * FROM page) TO '{scratch_dir / f'p{index:05d}.parquet'}' (FORMAT parquet)"
+            )
+            con.unregister("page")
+
+        if total == 0:
+            raise ValueError(f"aucun diagnostic pour le territoire {department}")
+
+        con.execute(f"""
+            CREATE OR REPLACE TEMP VIEW raw_rows AS
+            SELECT * FROM read_parquet('{scratch_dir}/p*.parquet')
+        """)
+        return _transform(con, department, destination, srid, total)
+    finally:
+        if scratch is None:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
 def prepare(
     rows: list[dict],
     department: str,
     destination: Path,
     connection: duckdb.DuckDBPyConnection | None = None,
 ) -> dict:
-    """Transforme des lignes d'API ADEME en un Parquet prepare."""
+    """Prepare un territoire depuis une liste deja chargee. Pratique pour les tests."""
     if not rows:
         raise ValueError(f"aucun diagnostic a preparer pour le departement {department}")
+    return prepare_stream([rows], department, destination, connection=connection)
 
-    con = connection or duckdb.connect()
+
+def _transform(
+    con: duckdb.DuckDBPyConnection,
+    department: str,
+    destination: Path,
+    srid: int,
+    source_rows: int,
+) -> dict:
     con.execute("INSTALL spatial; LOAD spatial;")
     destination.parent.mkdir(parents=True, exist_ok=True)
-
-    srid = srid_for(department)
-    con.register("raw_rows", _as_relation(con, rows))
 
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW diagnostics AS
@@ -174,23 +231,7 @@ def prepare(
         ) TO '{destination}' (FORMAT parquet, COMPRESSION zstd)
     """)
 
-    return _report(con, destination, len(rows), srid)
-
-
-def _as_relation(con: duckdb.DuckDBPyConnection, rows: list[dict]) -> duckdb.DuckDBPyRelation:
-    """Materialise les lignes d'API, toutes colonnes attendues presentes.
-
-    L'API omet les champs vides : sans normalisation, une colonne absente de la
-    premiere page ferait echouer la requete plus loin.
-    """
-    # L'API renvoie les nombres en nombres et les absences en null. On ramene
-    # tout au texte : les conversions de type se font une seule fois, en SQL, ou
-    # elles sont visibles et testables.
-    normalised = [
-        {c: (None if row.get(c) is None else str(row[c])) for c in COLUMNS}
-        for row in rows
-    ]
-    return con.from_arrow(_to_arrow(normalised))
+    return _report(con, destination, source_rows, srid)
 
 
 def _to_arrow(rows: list[dict]):

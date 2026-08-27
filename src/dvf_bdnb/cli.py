@@ -65,7 +65,11 @@ def check(
     raise typer.Exit(0 if something_new else 1)
 
 
-def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: Path) -> str:
+def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: Path, force: bool = False) -> str:
+    destination = out / "dvf" / f"dept-{dept}.parquet"
+    if destination.exists() and not force:
+        return "deja produit (--force pour refaire)"
+
     downloaded: list[Path] = []
     for year in years:
         target = WORK / "dvf" / year / f"{dept}.csv.gz"
@@ -83,7 +87,6 @@ def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: P
     if not downloaded:
         raise FileNotFoundError("aucune annee disponible")
 
-    destination = out / "dvf" / f"dept-{dept}.parquet"
     report = prepare_dvf.prepare(downloaded, destination)
     return f"{report['mutations']} mutations, {report['part_geolocalisee']} % geolocalisees"
 
@@ -116,14 +119,18 @@ def _run_parallel(items: list[str], jobs: int, work) -> None:
             typer.echo(f"  {item} : {motif}")
 
 
-def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path, jobs: int = 2) -> None:
+def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path, jobs: int = 2, force: bool = False) -> None:
     """Un territoire a la fois : l'API pagine, et charger la France entiere en
     memoire n'aurait pas de sens."""
-    _run_parallel(departments, jobs, lambda d: _prepare_dpe_one(entry, d, out))
+    _run_parallel(departments, jobs, lambda d: _prepare_dpe_one(entry, d, out, force))
 
 
-def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path) -> str:
-    rows = fetch.paginated_json(
+def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path, force: bool = False) -> str:
+    destination = out / "dpe" / f"dept-{dept}.parquet"
+    if destination.exists() and not force:
+        return "deja produit (--force pour refaire)"
+
+    pages = fetch.paginate(
         entry.url("api") + "/lines",
         {
             "size": 10000,
@@ -132,10 +139,7 @@ def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path) -> str:
             "qs": f'code_departement_ban:"{dept}"',
         },
     )
-    if not rows:
-        raise ValueError("aucun diagnostic")
-    destination = out / "dpe" / f"dept-{dept}.parquet"
-    report = prepare_dpe.prepare(rows, dept, destination)
+    report = prepare_dpe.prepare_stream(pages, dept, destination)
     return f"{report['diagnostics']} diagnostics, {report['part_bien_positionnee']} % positionnes"
 
 
@@ -202,6 +206,7 @@ def prepare(
     years: str = typer.Option("2021,2022,2023,2024,2025", help="Annees DVF a consolider."),
     out: Path = typer.Option(Path("out"), help="Repertoire de sortie."),
     jobs: int = typer.Option(4, help="Departements traites en parallele."),
+    force: bool = typer.Option(False, "--force", help="Refaire meme si le fichier existe deja."),
 ) -> None:
     """Telecharge et prepare une source, departement par departement.
 
@@ -216,7 +221,7 @@ def prepare(
         typer.echo(f"{len(depts)} territoire(s) a traiter : {', '.join(depts[:8])}…")
 
     if source == "dpe":
-        _prepare_dpe(catalogue["dpe"], depts, out, jobs)
+        _prepare_dpe(catalogue["dpe"], depts, out, jobs, force)
         return
     if source == "bdnb":
         _prepare_bdnb(catalogue["bdnb"], depts, out)
@@ -227,7 +232,59 @@ def prepare(
 
     entry = catalogue["dvf"]
     year_list = [y.strip() for y in years.split(",") if y.strip()]
-    _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out))
+    _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out, force))
+
+
+@app.command()
+def run(
+    millesime: str = typer.Option(None, help="Millesime a publier. Sans lui, on s'arrete apres la verification."),
+    sources: str = typer.Option("dvf,dpe", help="Sources a traiter, separees par des virgules."),
+    out: Path = typer.Option(Path("out"), help="Repertoire de sortie."),
+    jobs: int = typer.Option(6, help="Territoires traites en parallele."),
+    force: bool = typer.Option(False, "--force", help="Refaire meme ce qui existe deja."),
+) -> None:
+    """Enchaine tout : detection, preparation de chaque source, verification, publication.
+
+    Reprenable : un territoire deja produit est saute, sauf avec --force. Une
+    execution interrompue se relance donc sans tout refaire — ce qui compte
+    quand la chaine complete demande plus d'une heure.
+    """
+    demandees = [s.strip() for s in sources.split(",") if s.strip()]
+
+    typer.secho("\n1. Nouvelles donnees ?", bold=True)
+    try:
+        check.callback(source=None, state_file=STATE_FILE)
+    except SystemExit:
+        pass
+    except Exception as error:  # noqa: BLE001
+        typer.secho(f"  detection impossible : {error}", fg=typer.colors.YELLOW)
+
+    for source in demandees:
+        typer.secho(f"\n2. Preparation — {source}", bold=True)
+        try:
+            prepare(source=source, departments="all", years="2021,2022,2023,2024,2025",
+                    out=out, jobs=jobs, force=force)
+        except SystemExit:
+            continue
+
+    typer.secho("\n3. Controles qualite", bold=True)
+    try:
+        verify(out=out, baseline=None)
+    except SystemExit as stop:
+        if stop.code:
+            typer.secho(
+                "\nChaine interrompue : un controle bloque. Rien n'a ete publie.",
+                fg=typer.colors.RED, bold=True,
+            )
+            raise
+
+    if not millesime:
+        typer.secho("\nPret a publier. Relancer avec --millesime pour envoyer.", fg=typer.colors.YELLOW)
+        return
+
+    typer.secho(f"\n4. Publication — {millesime}", bold=True)
+    publish(millesime=millesime, out=out, source=None,
+            repo="cldt-fr/dvf-bdnb-ademe", dry_run=False, skip_checks=True)
 
 
 @app.command()

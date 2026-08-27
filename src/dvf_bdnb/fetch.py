@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 

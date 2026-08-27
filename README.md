@@ -158,13 +158,32 @@ uvx --from git+https://github.com/cldt-fr/dvf-bdnb-ademe dvf-bdnb \
 
 Le fichier apparaît dans `out/dvf/dept-33.parquet`. Comptez une minute pour un département moyen.
 
-Les autres commandes :
+### Tout le jeu, d'un coup
+
+```bash
+dvf-bdnb run --jobs 8
+```
+
+Une seule commande qui enchaîne : détection des nouveautés → préparation de chaque source, tous
+départements → contrôles qualité. Ajoutez `--millesime 2026-02-a` pour publier dans la foulée.
+
+**Compter environ une heure et demie** pour tout : dix minutes pour les 97 départements DVF (220 Mo
+produits), et le reste pour les 15,5 millions de diagnostics énergétiques.
+
+**C'est reprenable.** Un territoire déjà produit est sauté : une exécution interrompue se relance
+sans tout refaire. Utilisez `--force` pour recalculer malgré tout.
+
+### Les commandes séparément
 
 ```bash
 dvf-bdnb check                                   # de nouvelles données sont-elles parues ?
-dvf-bdnb prepare --source dpe --departments 33   # les diagnostics énergétiques
+dvf-bdnb prepare --source dvf                    # tout le jeu DVF (défaut : « all »)
+dvf-bdnb prepare --source dpe --departments 33   # un département précis
 dvf-bdnb verify                                  # contrôler ce qu'on vient de produire
 ```
+
+Les données de l'ADEME sont republiées **chaque semaine**, celles de DVF deux fois par an, la BDNB
+trois fois. `check` vous dit ce qui a bougé, sans rien télécharger.
 
 ---
 
