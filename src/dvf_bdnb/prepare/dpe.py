@@ -26,14 +26,29 @@ import duckdb
 # L'ADEME publie les coordonnees dans le systeme metrique LOCAL de chaque
 # territoire. Les traiter uniformement en Lambert 93 — ce que fait son propre
 # `_geopoint` — place les diagnostics ultramarins a des milliers de kilometres.
-METRIC_SRID = 2154  # Lambert 93, metropole et Corse
+METRIC_SRID = 2154  # Lambert 93, métropole et Corse
+
+# Chaque territoire a son système. Tous ceux-ci ont été vérifiés en reprojetant
+# une coordonnée réelle de l'ADEME et en contrôlant qu'elle retombe bien sur le
+# territoire.
 OVERSEAS_SRID = {
     "971": 5490,  # Guadeloupe — RGAF09 / UTM 20N
     "972": 5490,  # Martinique — RGAF09 / UTM 20N
     "973": 2972,  # Guyane — RGFG95 / UTM 22N
-    "974": 2975,  # La Reunion — RGR92 / UTM 40S
+    "974": 2975,  # La Réunion — RGR92 / UTM 40S
+    "975": 4467,  # Saint-Pierre-et-Miquelon — RGSPM06 / UTM 21N
     "976": 4471,  # Mayotte — RGM04 / UTM 38S
+    "977": 5490,  # Saint-Barthélemy — RGAF09 / UTM 20N
+    "978": 5490,  # Saint-Martin — RGAF09 / UTM 20N
+    "988": 3163,  # Nouvelle-Calédonie — RGNC91-93 / Lambert NC
 }
+
+# Départements où les coordonnées sont en Lambert 93. Énumérés plutôt que
+# déduits : un territoire inconnu doit lever une erreur, pas retomber
+# silencieusement sur la métropole.
+METROPOLITAN = frozenset(
+    [f"{n:02d}" for n in range(1, 96) if n != 20] + ["2A", "2B"]
+)
 
 # En dessous, la position BAN est trop incertaine pour rattacher le diagnostic
 # a quoi que ce soit.
@@ -65,8 +80,22 @@ COLUMNS = (
 
 
 def srid_for(department: str) -> int:
-    """Systeme metrique source d'un territoire."""
-    return OVERSEAS_SRID.get(department, METRIC_SRID)
+    """Système métrique source d'un territoire.
+
+    Lève sur un territoire inconnu plutôt que de supposer le Lambert 93. C'est
+    exactement l'hypothèse qui rend faux le champ de position publié par
+    l'ADEME : traiter la Nouvelle-Calédonie comme la Bourgogne place ses
+    diagnostics à des milliers de kilomètres, sans la moindre erreur.
+    """
+    if department in OVERSEAS_SRID:
+        return OVERSEAS_SRID[department]
+    if department in METROPOLITAN:
+        return METRIC_SRID
+    raise ValueError(
+        f"territoire « {department} » inconnu : son système de coordonnées n'est pas "
+        "renseigné. L'ajouter à OVERSEAS_SRID après avoir vérifié qu'une coordonnée "
+        "réelle y retombe bien, plutôt que de supposer le Lambert 93."
+    )
 
 
 def prepare(

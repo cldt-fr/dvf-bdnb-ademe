@@ -7,7 +7,9 @@ from pathlib import Path
 
 import typer
 
-from dvf_bdnb import fetch, publish as publisher, quality, sources as registry
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from dvf_bdnb import departments as depts_module, fetch, publish as publisher, quality, sources as registry
 from dvf_bdnb.prepare import bdnb as prepare_bdnb, dpe as prepare_dpe, dvf as prepare_dvf
 from dvf_bdnb.state import State, SourceState
 
@@ -62,9 +64,81 @@ def check(
     raise typer.Exit(0 if something_new else 1)
 
 
-def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path) -> None:
-    """Un departement a la fois : l'API pagine, et un million de lignes en
-    memoire pour la France entiere n'aurait pas de sens."""
+def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: Path) -> str:
+    downloaded: list[Path] = []
+    for year in years:
+        target = WORK / "dvf" / year / f"{dept}.csv.gz"
+        if target.exists():
+            downloaded.append(target)
+            continue
+        try:
+            fetch.download(entry.url("file", year=year, dept=dept), target)
+            downloaded.append(target)
+        except Exception:  # noqa: BLE001
+            # Une annee absente pour un departement est normale : certaines ne
+            # commencent qu'en 2022. On ne fait pas echouer pour autant.
+            continue
+
+    if not downloaded:
+        raise FileNotFoundError("aucune annee disponible")
+
+    destination = out / "dvf" / f"dept-{dept}.parquet"
+    report = prepare_dvf.prepare(downloaded, destination)
+    return f"{report['mutations']} mutations, {report['part_geolocalisee']} % geolocalisees"
+
+
+def _run_parallel(items: list[str], jobs: int, work) -> None:
+    """Traite les territoires en parallele, sans qu'un echec emporte les autres.
+
+    Sur un jeu complet, un territoire indisponible ne doit pas condamner les
+    cent autres : on collecte les echecs et on les recapitule a la fin.
+    """
+    reussites, echecs = 0, []
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        futures = {pool.submit(work, item): item for item in items}
+        for future in as_completed(futures):
+            item = futures[future]
+            try:
+                resume = future.result()
+                reussites += 1
+                typer.secho(f"  {item:4} {resume}", fg=typer.colors.GREEN)
+            except Exception as error:  # noqa: BLE001
+                echecs.append((item, str(error)[:90]))
+                typer.secho(f"  {item:4} echec : {str(error)[:90]}", fg=typer.colors.RED)
+
+    typer.echo("")
+    typer.secho(f"{reussites} territoire(s) traites.", fg=typer.colors.GREEN, bold=True)
+    if echecs:
+        typer.secho(f"{len(echecs)} en echec :", fg=typer.colors.RED, bold=True)
+        for item, motif in echecs:
+            typer.echo(f"  {item} : {motif}")
+
+
+def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path, jobs: int = 2) -> None:
+    """Un territoire a la fois : l'API pagine, et charger la France entiere en
+    memoire n'aurait pas de sens."""
+    _run_parallel(departments, jobs, lambda d: _prepare_dpe_one(entry, d, out))
+
+
+def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path) -> str:
+    rows = fetch.paginated_json(
+        entry.url("api") + "/lines",
+        {
+            "size": 10000,
+            "select": ",".join(prepare_dpe.COLUMNS),
+            "sort": "numero_dpe",
+            "qs": f'code_departement_ban:"{dept}"',
+        },
+    )
+    if not rows:
+        raise ValueError("aucun diagnostic")
+    destination = out / "dpe" / f"dept-{dept}.parquet"
+    report = prepare_dpe.prepare(rows, dept, destination)
+    return f"{report['diagnostics']} diagnostics, {report['part_bien_positionnee']} % positionnes"
+
+
+def _prepare_dpe_legacy(entry: registry.Source, departments: list[str], out: Path) -> None:
     for dept in departments:
         typer.echo(f"{dept} : telechargement…")
         rows = fetch.paginated_json(
@@ -120,16 +194,28 @@ def _probe_source(entry: registry.Source) -> fetch.RemoteInfo:
 @app.command()
 def prepare(
     source: str = typer.Option(..., help="dvf, dpe ou bdnb."),
-    departments: str = typer.Option(..., help="Codes departement separes par des virgules."),
+    departments: str = typer.Option(
+        "all",
+        help="Codes departement separes par des virgules, ou « all » pour tout le jeu (defaut).",
+    ),
     years: str = typer.Option("2021,2022,2023,2024,2025", help="Annees DVF a consolider."),
     out: Path = typer.Option(Path("out"), help="Repertoire de sortie."),
+    jobs: int = typer.Option(4, help="Departements traites en parallele."),
 ) -> None:
-    """Telecharge et prepare une source, departement par departement."""
+    """Telecharge et prepare une source, departement par departement.
+
+    Sans --departments, tout le jeu est traite. La liste n'est pas codee en dur :
+    elle est demandee a la source, qui sait seule ce qu'elle publie.
+    """
     catalogue = registry.registry()
-    depts = [d.strip() for d in departments.split(",") if d.strip()]
+    api_url = catalogue["dpe"].urls.get("api") if source == "dpe" else None
+    depts = depts_module.resolve(departments, source, api_url)
+
+    if departments.lower() in ("all", "tous"):
+        typer.echo(f"{len(depts)} territoire(s) a traiter : {', '.join(depts[:8])}…")
 
     if source == "dpe":
-        _prepare_dpe(catalogue["dpe"], depts, out)
+        _prepare_dpe(catalogue["dpe"], depts, out, jobs)
         return
     if source == "bdnb":
         _prepare_bdnb(catalogue["bdnb"], depts, out)
@@ -140,31 +226,7 @@ def prepare(
 
     entry = catalogue["dvf"]
     year_list = [y.strip() for y in years.split(",") if y.strip()]
-
-    for dept in depts:
-        downloaded: list[Path] = []
-        for year in year_list:
-            url = entry.url("file", year=year, dept=dept)
-            target = WORK / "dvf" / year / f"{dept}.csv.gz"
-            if target.exists():
-                downloaded.append(target)
-                continue
-            try:
-                fetch.download(url, target)
-                downloaded.append(target)
-            except Exception as error:  # noqa: BLE001
-                # Une annee absente pour un departement est normale : on le dit
-                # sans faire echouer le departement entier.
-                typer.secho(f"  {dept}/{year} : indisponible ({error})", fg=typer.colors.YELLOW)
-
-        if not downloaded:
-            typer.secho(f"{dept} : aucune annee disponible", fg=typer.colors.RED)
-            continue
-
-        destination = out / "dvf" / f"dept-{dept}.parquet"
-        report = prepare_dvf.prepare(downloaded, destination)
-        typer.echo(f"{dept} : {json.dumps(report, ensure_ascii=False)}")
-        typer.secho(f"  -> {destination}", fg=typer.colors.GREEN)
+    _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out))
 
 
 @app.command()

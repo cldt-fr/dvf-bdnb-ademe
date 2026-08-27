@@ -74,7 +74,11 @@ BOUNDS = {
     "972": (14.3, 15.0, -61.3, -60.7),   # Martinique
     "973": (2.0, 6.0, -55.0, -51.5),     # Guyane
     "974": (-21.5, -20.8, 55.1, 55.9),   # La Réunion
+    "975": (46.7, 47.2, -56.5, -56.1),   # Saint-Pierre-et-Miquelon
     "976": (-13.1, -12.6, 45.0, 45.3),   # Mayotte
+    "977": (17.8, 18.0, -63.0, -62.7),   # Saint-Barthélemy
+    "978": (18.0, 18.2, -63.2, -62.9),   # Saint-Martin
+    "988": (-22.8, -19.5, 163.5, 168.2), # Nouvelle-Calédonie
 }
 
 # DVF ne couvre pas ces départements : livre foncier d'Alsace-Moselle, et Mayotte.
