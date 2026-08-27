@@ -90,3 +90,26 @@ def test_le_rapport_expose_le_dedoublonnage(tmp_path: Path) -> None:
     assert report["lignes_ecartees"] == 1
     assert report["mutations"] == 4          # les deux parcelles de 2024-1 fusionnent
     assert report["part_geolocalisee"] == 100.0
+
+
+def test_une_virgule_dans_une_adresse_ne_casse_pas_la_lecture(tmp_path: Path) -> None:
+    """Cas réel, rencontré sur quatre départements du jeu complet.
+
+    DuckDB déduit le dialecte du PREMIER fichier d'une liste. Si celui-ci n'a
+    aucun champ entre guillemets, il conclut qu'il n'y en a pas — et le premier
+    nom de voie contenant une virgule fait alors compter 41 colonnes au lieu de
+    40, dans un autre fichier.
+
+    On impose donc le dialecte au lieu de le laisser deviner.
+    """
+    avec_virgule = FIXTURE.parent / "geo-dvf-virgule-dans-adresse.csv"
+    destination = tmp_path / "melange.parquet"
+
+    # L'ordre compte : le fichier sans guillemets vient en premier, exactement
+    # comme dans le cas réel.
+    dvf.prepare([FIXTURE, avec_virgule], destination)
+
+    produites = rows(destination)
+    oradour = next(m for m in produites if m["nom_commune"] == "Oradour")
+    assert oradour["valeur_fonciere"] == 10000
+    assert oradour["surface_bati"] == 66

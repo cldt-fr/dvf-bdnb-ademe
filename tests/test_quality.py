@@ -122,3 +122,40 @@ def test_la_reference_se_lit_dans_le_manifeste_precedent() -> None:
         }
     })
     assert baseline == {"dvf/33": {"lignes": 120000}}
+
+
+def test_saint_martin_est_accepte_sous_le_971(tmp_path: Path) -> None:
+    """DVF classe Saint-Martin et Saint-Barthélemy sous le 971.
+
+    Ces collectivités sont distinctes depuis 2007, mais DVF continue de les y
+    rattacher — 2 886 ventes sur le millésime courant. Une emprise limitée à la
+    Guadeloupe continentale les rejetterait alors que la donnée est juste.
+    """
+    points = [(16.24, -61.53)] * 100 + [(18.08, -63.08)] * 20 + [(17.9, -62.85)] * 5
+    assert quality.check_dataset(jeu(tmp_path, points), "dvf", "971").passed
+
+
+def test_les_coquilles_de_la_source_ne_bloquent_pas(tmp_path: Path) -> None:
+    """Mesuré sur les Hauts-de-Seine : 155 ventes sur 117 446 sont géolocalisées
+    vers la latitude 83, en Arctique.
+
+    C'est une erreur de geo-dvf, pas de notre traitement, et nous ne pouvons pas
+    la corriger. Bloquer dessus condamnerait la publication pour une faute qui
+    n'est pas la nôtre.
+    """
+    points = [(48.85, 2.25)] * 1000 + [(83.51, 0.27)]  # 0,1 %
+    rapport = quality.check_dataset(jeu(tmp_path, points), "dvf", "92")
+
+    assert rapport.passed
+    emprise = next(f for f in rapport.findings if f.check == "emprise")
+    assert emprise.level is Level.WARN
+    assert "coquilles" in emprise.message
+
+
+def test_une_reprojection_ratee_bloque_toujours(tmp_path: Path) -> None:
+    """Le seuil relevé ne doit pas laisser passer l'erreur qu'il vise.
+
+    Une reprojection fausse envoie l'écrasante majorité des points ailleurs.
+    """
+    points = [(48.85, 2.25)] * 50 + [(56.0, -3.0)] * 50  # 50 %
+    assert not quality.check_dataset(jeu(tmp_path, points), "dvf", "92").passed

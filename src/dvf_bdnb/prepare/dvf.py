@@ -50,9 +50,18 @@ def prepare(sources: list[Path], destination: Path, connection: duckdb.DuckDBPyC
     # DuckDB refuse les parametres lies dans un CREATE VIEW : la liste est donc
     # inlinee, avec echappement des apostrophes.
     files = ", ".join("'" + str(p).replace("'", "''") + "'" for p in sources)
+    # Dialecte impose, jamais devine. DuckDB deduit le dialecte du PREMIER
+    # fichier de la liste : si celui-la n'a aucun champ entre guillemets, il
+    # conclut qu'il n'y en a pas, et le premier nom de voie contenant une
+    # virgule — « RTE D'AIGRE , LES CHATELETS » — fait exploser le decoupage
+    # sur un autre fichier. geo-dvf est du CSV standard : on le lui dit.
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW raw AS
-        SELECT * FROM read_csv([{files}], header = true, all_varchar = true)
+        SELECT * FROM read_csv(
+            [{files}],
+            header = true, all_varchar = true,
+            delim = ',', quote = '"', escape = '"'
+        )
     """)
 
     _assert_shape(con)

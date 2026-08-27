@@ -133,9 +133,15 @@ def _register(con: duckdb.DuckDBPyConnection, csv_dir: Path) -> set[str]:
         if not path.exists():
             continue
         escaped = str(path).replace("'", "''")
+        # Dialecte impose plutot que devine : un champ entre guillemets
+        # contenant une virgule suffit a faire deraper un sniffer.
         con.execute(f"""
             CREATE OR REPLACE TEMP VIEW {alias} AS
-            SELECT * FROM read_csv('{escaped}', header = true, all_varchar = true)
+            SELECT * FROM read_csv(
+                '{escaped}',
+                header = true, all_varchar = true,
+                delim = ',', quote = '"', escape = '"'
+            )
         """)
         found.add(alias)
     return found

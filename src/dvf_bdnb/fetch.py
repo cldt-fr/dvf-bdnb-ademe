@@ -37,6 +37,8 @@ class RemoteInfo:
     # Un fichier se mesure en octets, un jeu expose par API en lignes. Confondre
     # les deux affiche « 0.0 Go » pour 15 millions de diagnostics.
     unit: str = "bytes"
+    # Cadence annoncee par la source elle-meme, quand elle la publie.
+    frequency: str | None = None
 
     def human_size(self) -> str:
         if self.size is None:
@@ -72,13 +74,20 @@ def probe_dataset(url: str) -> RemoteInfo:
         response.raise_for_status()
         payload = response.json()
 
-    updated = payload.get("updatedAt") or payload.get("dataUpdatedAt")
+    # `dataUpdatedAt` d'abord, et surtout PAS `updatedAt` : le second date la
+    # derniere modification des METADONNEES, pas des donnees. Sur le jeu DPE, il
+    # etait fige depuis deux mois pendant que les donnees changeaient chaque
+    # semaine — de quoi annoncer « inchange » tout ce temps.
+    updated = payload.get("dataUpdatedAt") or payload.get("updatedAt")
     count = payload.get("count")
     return RemoteInfo(
         size=int(count) if count is not None else None,
+        # Le couple date + nombre de lignes fait une marque de version aussi
+        # fiable qu'un ETag : une republication a l'identique ne declenche rien.
         etag=f"{updated}:{count}" if updated else None,
         last_modified=updated,
         unit="rows",
+        frequency=payload.get("frequency"),
     )
 
 

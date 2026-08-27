@@ -17,7 +17,7 @@ avant de pouvoir s'en servir.
 |-----|-----------|-------------|---------|---------------------|
 | **DVF** | DGFiP, géolocalisé par Etalab | ~18 M mutations, fenêtre glissante ~5 ans | ~2×/an | Une ligne par lot, tout en texte, un fichier par année et par département |
 | **BDNB** | CSTB | ~32 M bâtiments, 40,5 Go compressés | 3×/an | Dump de 90 tables, schéma nommé d'après le millésime |
-| **DPE** | ADEME | 15,5 M diagnostics depuis 07/2021 | mensuelle | ~250 colonnes, coordonnées géographiques fausses en outre-mer |
+| **DPE** | ADEME | 15,5 M diagnostics depuis 07/2021 | **hebdomadaire** | ~250 colonnes, coordonnées géographiques fausses en outre-mer |
 
 Chacun est déjà mirroré un peu partout — mais **toujours brut**. Personne ne publie ces jeux
 nettoyés, géolocalisés, typés et prêts à charger.
@@ -192,6 +192,12 @@ déclenche que sur changement réel. Latence de détection : moins de 24 h.
 Une source exposée par API n'a pas d'`ETag` : pour le DPE, la marque de version est le couple date de
 mise à jour et nombre de lignes.
 
+**Piège rencontré** : l'API expose deux dates. `updatedAt` date la dernière modification des
+*métadonnées*, `dataUpdatedAt` celle des *données*. Sur le jeu DPE, la première était figée depuis
+deux mois pendant que la seconde bougeait chaque semaine — s'y fier fait annoncer « inchangé » tout
+ce temps et rate toutes les mises à jour. Le DPE étant republié **chaque semaine**, l'erreur aurait
+coûté huit millésimes.
+
 ### 4.5 Calcul hors de GitHub
 
 Les runners GitHub offrent 14 Go de disque et 6 h de limite. La BDNB en fait 40 à elle seule. Le
@@ -250,6 +256,10 @@ Ils sont ici pour que personne ne les repaye.
 | wget ne réessaie pas sur HTTP 5xx par défaut | Abandon silencieux sur un 500 transitoire, fichier vide |
 | Nom du schéma BDNB indexé sur le millésime | Code en dur = tout casse à la livraison suivante, sans erreur |
 | CSV mal formé lu par DuckDB | Une seule colonne, et un message qui envoie chercher ailleurs |
+| Dialecte CSV deviné sur le premier fichier d'une liste | Six départements en échec : un nom de voie contenant une virgule fait compter 41 colonnes au lieu de 40 |
+| `updatedAt` confondu avec `dataUpdatedAt` | « Inchangé » pendant deux mois sur un jeu republié chaque semaine |
+| Territoire absent de la table des projections | Coordonnées silencieusement fausses, comme celles qu'on reproche à la source |
+| Saint-Martin classé sous le 971 par DVF | Un contrôle d'emprise trop étroit rejette une donnée juste |
 | DVF en fenêtre glissante, pas historique complet | Conclure à tort qu'un bien n'a jamais été vendu |
 
 ---

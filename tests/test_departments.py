@@ -49,3 +49,42 @@ def test_un_territoire_inconnu_leve_plutot_que_de_supposer() -> None:
 def test_chaque_territoire_connu_a_son_systeme(territoire: str, srid: int) -> None:
     """Chacun a été vérifié en reprojetant une coordonnée réelle de l'ADEME."""
     assert dpe.srid_for(territoire) == srid
+
+
+def test_la_marque_de_version_suit_les_donnees_pas_les_metadonnees(monkeypatch) -> None:
+    """Piège rencontré sur le jeu DPE de l'ADEME.
+
+    `updatedAt` date la dernière modification des MÉTADONNÉES ; `dataUpdatedAt`
+    celle des données. Le premier était figé depuis deux mois pendant que les
+    données changeaient chaque semaine : s'y fier fait annoncer « inchangé »
+    tout ce temps, et rate toutes les mises à jour.
+    """
+    import httpx
+
+    from dvf_bdnb import fetch
+
+    class FausseReponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None: ...
+
+        def json(self) -> dict:
+            return {
+                "updatedAt": "2026-06-30T10:17:01Z",      # métadonnées, ancien
+                "dataUpdatedAt": "2026-08-26T19:11:35Z",  # données, récent
+                "count": 15471503,
+                "frequency": "weekly",
+            }
+
+    class FauxClient:
+        def __init__(self, **_): ...
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def get(self, *_, **__): return FausseReponse()
+
+    monkeypatch.setattr(httpx, "Client", FauxClient)
+    info = fetch.probe_dataset("http://exemple")
+
+    assert info.last_modified == "2026-08-26T19:11:35Z"
+    assert info.frequency == "weekly"
+    assert info.size == 15471503

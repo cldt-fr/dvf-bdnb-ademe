@@ -22,7 +22,7 @@ label = "DPE logements existants (depuis juillet 2021)"
 producer = "ADEME"
 licence = "Licence Ouverte 2.0"
 api_url = "https://data.ademe.fr/data-fair/api/v1/datasets/meg-83tjwtg8dyz4vv7h1dqe"
-cadence = "mensuelle"
+cadence = "hebdomadaire"  # annoncee par la source : frequency = weekly
 format = "api"
 
 [bdnb]

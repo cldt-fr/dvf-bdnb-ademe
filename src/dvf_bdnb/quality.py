@@ -70,7 +70,12 @@ class Report:
 # lève aucune exception et se voit seulement sur une carte.
 BOUNDS = {
     "metropole": (41.0, 51.5, -5.5, 9.8),
-    "971": (15.7, 16.6, -61.9, -60.9),   # Guadeloupe
+    # Guadeloupe : l'emprise couvre TOUT l'archipel tel que DVF le classe, y
+    # compris Saint-Martin (18,1) et Saint-Barthelemy (17,9). Ces deux
+    # collectivites sont distinctes depuis 2007, mais DVF continue de les
+    # rattacher au 971 — 2 886 ventes sur le millesime courant. Une emprise
+    # etroite les rejetterait alors que la donnee est juste.
+    "971": (15.7, 18.2, -63.2, -60.9),   # Guadeloupe + Saint-Martin + Saint-Barthelemy
     "972": (14.3, 15.0, -61.3, -60.7),   # Martinique
     "973": (2.0, 6.0, -55.0, -51.5),     # Guyane
     "974": (-21.5, -20.8, 55.1, 55.9),   # La Réunion
@@ -87,6 +92,15 @@ DVF_UNCOVERED = {"57", "67", "68", "976"}
 
 # En deçà, une chute de volume signale un problème amont plutôt qu'une évolution.
 MAX_VOLUME_DROP = 0.20
+
+# Part de points hors emprise au-delà de laquelle on bloque.
+#
+# Calibré sur le jeu réel : une reprojection ratée envoie ~100 % des points
+# ailleurs, tandis que les sources contiennent leurs propres coquilles — 155
+# ventes des Hauts-de-Seine sont géolocalisées vers la latitude 83, en Arctique,
+# soit 0,13 % du département. Bloquer là-dessus condamnerait la publication pour
+# une erreur qui n'est pas la nôtre et que nous ne pouvons pas corriger.
+MAX_OUT_OF_BOUNDS = 0.01
 
 
 def bounds_for(department: str) -> tuple[float, float, float, float]:
@@ -169,10 +183,11 @@ def _check_bounds(con: duckdb.DuckDBPyConnection, path: str, department: str, la
 
     if part == 0:
         return Finding(Level.OK, "emprise", f"{label} : tous les points dans le territoire")
-    if part < 0.001:
+    if part < MAX_OUT_OF_BOUNDS:
         return Finding(
             Level.WARN, "emprise",
-            f"{label} : {hors_emprise} point(s) hors emprise, sans doute des saisies isolées",
+            f"{label} : {hors_emprise} point(s) hors emprise sur {localises} "
+            f"({part:.2%}) — vraisemblablement des coquilles de la source",
             detail,
         )
     return Finding(

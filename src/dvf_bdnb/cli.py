@@ -55,7 +55,8 @@ def check(
         something_new = something_new or changed
 
         marker = "NOUVEAU" if changed else "inchange"
-        typer.echo(f"{name:6} : {marker:8} — {info.human_size()}")
+        cadence = f"  (maj {info.frequency})" if info.frequency else ""
+        typer.echo(f"{name:6} : {marker:8} — {info.human_size()}{cadence}")
 
         if changed:
             state.set(name, SourceState(etag=info.etag, last_modified=info.last_modified, size=info.size))
