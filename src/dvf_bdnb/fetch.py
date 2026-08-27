@@ -285,6 +285,103 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+class _ResumableReader:
+    """Flux d'octets qui survit a une coupure reseau, par requetes de plage.
+
+    MOTIF, constate sur l'archive CSV de la BDNB : une seule requete GET de 40 Go
+    ne tient pas. Trois tentatives d'affilee sont mortes entre 5,7 et 7,5 Go, au
+    milieu du meme membre — un fichier de 12,3 Go a lui seul.
+
+    Relancer depuis zero a chaque coupure ne converge jamais. Ici, la reprise se
+    fait a l'octet ou la lecture s'est arretee : la couche gzip/tar au-dessus ne
+    voit qu'un flux continu et ignore qu'il a fallu plusieurs requetes pour le
+    produire.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        total: int | None,
+        on_read: Callable[[int], None] | None = None,
+        on_resume: Callable[[int, str], None] | None = None,
+        max_resumes: int = 40,
+    ):
+        self._url = url
+        self._total = total
+        self._on_read = on_read
+        self._on_resume = on_resume
+        self._max_resumes = max_resumes
+        self._resumes = 0
+        self._offset = 0
+        self._buffer = b""
+        self._client = httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False)
+        self._response = None
+        self._blocks = None
+        self._open()
+
+    def _open(self) -> None:
+        headers = {"Range": f"bytes={self._offset}-"} if self._offset else {}
+        self._response = self._client.stream("GET", self._url, headers=headers).__enter__()
+        self._response.raise_for_status()
+        if self._offset and self._response.status_code != 206:
+            raise OSError(
+                "la source ne gere pas la reprise par plage (Range) : "
+                f"code {self._response.status_code} au lieu de 206."
+            )
+        self._blocks = self._response.iter_bytes(8 * 1024 * 1024)
+
+    def _next_block(self) -> bytes | None:
+        while True:
+            try:
+                block = next(self._blocks)
+                self._offset += len(block)
+                if self._on_read:
+                    self._on_read(len(block))
+                return block
+            except StopIteration:
+                if self._total is not None and self._offset < self._total:
+                    # Flux clos avant la fin : c'est une coupure, pas une fin.
+                    if not self._resume("flux clos prematurement"):
+                        raise
+                    continue
+                return None
+            except httpx.HTTPError as error:
+                if not self._resume(str(error)[:120]):
+                    raise
+                continue
+
+    def _resume(self, raison: str) -> bool:
+        if self._resumes >= self._max_resumes:
+            return False
+        self._resumes += 1
+        if self._on_resume:
+            self._on_resume(self._offset, raison)
+        try:
+            self._response.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        self._open()
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            block = self._next_block()
+            if block is None:
+                break
+            self._buffer += block
+        if size < 0:
+            out, self._buffer = self._buffer, b""
+            return out
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    def close(self) -> None:
+        try:
+            self._response.__exit__(None, None, None)
+        finally:
+            self._client.close()
+
+
 class _StreamReader:
     """Adapte un flux httpx (iterateur d'octets) a l'interface `read(n)` de tarfile."""
 
@@ -438,12 +535,16 @@ def extract_members(
             if on_progress:
                 on_progress(read, info.size)
 
+        reader = None
         try:
-            with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
-                with client.stream("GET", url) as response:
-                    response.raise_for_status()
-                    reader = _StreamReader(response.iter_bytes(8 * 1024 * 1024), note)
-                    found = extract_from_stream(reader, destination, remaining, on_member=on_member)
+            reader = _ResumableReader(
+                url, info.size, note,
+                on_resume=lambda octets, raison: (
+                    on_retry(0, f"coupure a {octets / 1e9:.1f} Go ({raison}) — reprise a l'octet")
+                    if on_retry else None
+                ),
+            )
+            found = extract_from_stream(reader, destination, remaining, on_member=on_member)
             return already + found
         except Exception as error:  # reseau coupe, gzip tronque, membre corrompu
             last_error = error
@@ -463,6 +564,9 @@ def extract_members(
                 return already
             if attempt < attempts:
                 continue
+        finally:
+            if reader is not None:
+                reader.close()
 
     raise OSError(
         f"extraction de l'archive echouee apres {attempts} tentatives : {last_error}"
