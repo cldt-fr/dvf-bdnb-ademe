@@ -315,13 +315,19 @@ class _ResumableReader:
         self._offset = 0
         self._buffer = b""
         self._client = httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False)
+        self._contexte = None
         self._response = None
         self._blocks = None
         self._open()
 
     def _open(self) -> None:
         headers = {"Range": f"bytes={self._offset}-"} if self._offset else {}
-        self._response = self._client.stream("GET", self._url, headers=headers).__enter__()
+        # Le gestionnaire de contexte doit etre GARDE, pas seulement ouvert :
+        # `client.stream()` renvoie le gestionnaire, `__enter__` la reponse. Ne
+        # garder que la reponse laisse le gestionnaire etre ramasse, ce qui
+        # ferme le flux sous les pieds du lecteur.
+        self._contexte = self._client.stream("GET", self._url, headers=headers)
+        self._response = self._contexte.__enter__()
         self._response.raise_for_status()
         if self._offset and self._response.status_code != 206:
             raise OSError(
@@ -356,12 +362,18 @@ class _ResumableReader:
         self._resumes += 1
         if self._on_resume:
             self._on_resume(self._offset, raison)
-        try:
-            self._response.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
+        self._fermer_contexte()
         self._open()
         return True
+
+    def _fermer_contexte(self) -> None:
+        if self._contexte is None:
+            return
+        try:
+            self._contexte.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        self._contexte = None
 
     def read(self, size: int = -1) -> bytes:
         while size < 0 or len(self._buffer) < size:
@@ -377,7 +389,7 @@ class _ResumableReader:
 
     def close(self) -> None:
         try:
-            self._response.__exit__(None, None, None)
+            self._fermer_contexte()
         finally:
             self._client.close()
 

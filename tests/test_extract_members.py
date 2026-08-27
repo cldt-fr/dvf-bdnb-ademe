@@ -102,6 +102,26 @@ def test_reprise_ne_re_extrait_pas_ce_qui_est_deja_la(tmp_path: Path, monkeypatc
 # ne converge jamais ; il faut reprendre la ou la lecture s'est arretee.
 
 
+class _FauxContexte:
+    """`client.stream()` renvoie un gestionnaire de contexte, PAS la reponse.
+
+    Les modeliser comme un seul objet a masque un vrai defaut : ne garder que la
+    reponse laissait le gestionnaire etre ramasse, et le flux se fermait en
+    pleine lecture.
+    """
+
+    def __init__(self, reponse):
+        self._reponse = reponse
+        self.sorti = False
+
+    def __enter__(self):
+        return self._reponse
+
+    def __exit__(self, *a):
+        self.sorti = True
+        return False
+
+
 class _FausseReponse:
     def __init__(self, corps: bytes, debut: int, coupe_apres: int | None):
         self.status_code = 206 if debut else 200
@@ -123,12 +143,6 @@ class _FausseReponse:
             envoye += len(bloc)
             yield bloc
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
 
 class _FauxClient:
     """Sert un corps en memoire, en coupant la premiere requete a mi-parcours."""
@@ -143,10 +157,10 @@ class _FauxClient:
             debut = int(headers["Range"].split("=")[1].split("-")[0])
         self.journal.append(debut)
         premiere = len(self.journal) == 1
-        return _FausseReponse(
+        return _FauxContexte(_FausseReponse(
             self.corps[debut:], debut,
             coupe_apres=len(self.corps) // 3 if premiere else None,
-        )
+        ))
 
     def close(self):
         return None
@@ -201,7 +215,7 @@ def test_une_source_sans_reprise_par_plage_est_denoncee(monkeypatch) -> None:
             self.journal.append(0)
             reponse = _FausseReponse(self.corps, 0, len(corps) // 3 if premiere else None)
             reponse.status_code = 200      # ignore le Range demande
-            return reponse
+            return _FauxContexte(reponse)
 
     monkeypatch.setattr(_httpx, "Client", lambda **k: _ClientSansRange(corps, []))
 
