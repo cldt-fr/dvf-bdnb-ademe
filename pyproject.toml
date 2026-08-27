@@ -20,6 +20,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/dvf_bdnb"]
 
+# Le registre des sources est livré AVEC le code : sans cela, l'outil fonctionne
+# depuis le dépôt et échoue une fois installé.
+artifacts = ["src/dvf_bdnb/sources.toml"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

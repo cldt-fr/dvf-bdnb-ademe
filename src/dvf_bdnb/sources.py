@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,9 +53,27 @@ def registry(path: Path | None = None) -> dict[str, Source]:
 
 
 def _default_registry_path() -> Path:
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "sources.toml"
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError("sources.toml introuvable")
+    """Registre embarqué dans le paquet.
+
+    Il vit à côté du code, et non à la racine du dépôt : sinon il n'est pas
+    livré avec le paquet installé, et l'outil échoue au premier lancement chez
+    quelqu'un d'autre — en n'ayant jamais échoué chez soi.
+
+    `DVF_BDNB_SOURCES` permet de pointer un autre registre, pour essayer une URL
+    sans réinstaller.
+    """
+    override = os.environ.get("DVF_BDNB_SOURCES")
+    if override:
+        path = Path(override).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"registre introuvable : {path}")
+        return path
+
+    embedded = Path(__file__).with_name("sources.toml")
+    if embedded.exists():
+        return embedded
+
+    raise FileNotFoundError(
+        "sources.toml introuvable dans le paquet. Réinstaller, ou pointer un "
+        "registre avec la variable DVF_BDNB_SOURCES."
+    )

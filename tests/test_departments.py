@@ -88,3 +88,18 @@ def test_la_marque_de_version_suit_les_donnees_pas_les_metadonnees(monkeypatch) 
     assert info.last_modified == "2026-08-26T19:11:35Z"
     assert info.frequency == "weekly"
     assert info.size == 15471503
+
+
+def test_le_registre_est_livre_avec_le_paquet() -> None:
+    """Il doit vivre à côté du code, pas à la racine du dépôt.
+
+    Sinon l'outil marche depuis le dépôt et échoue au premier lancement chez
+    quelqu'un d'autre — en n'ayant jamais échoué chez soi.
+    """
+    from pathlib import Path
+
+    from dvf_bdnb import sources
+
+    embarque = Path(sources.__file__).with_name("sources.toml")
+    assert embarque.exists(), "sources.toml doit etre dans src/dvf_bdnb/"
+    assert set(sources.registry()) == {"dvf", "dpe", "bdnb"}
