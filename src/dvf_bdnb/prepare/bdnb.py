@@ -133,18 +133,72 @@ def _register(con: duckdb.DuckDBPyConnection, csv_dir: Path) -> set[str]:
         if not path.exists():
             continue
         escaped = str(path).replace("'", "''")
-        # Dialecte impose plutot que devine : un champ entre guillemets
-        # contenant une virgule suffit a faire deraper un sniffer.
+        delim = _delimiter(path)
+        # Le separateur est LU dans l'en-tete, jamais devine dans les donnees.
+        #
+        # Il etait code a la virgule : l'export BDNB utilise le point-virgule
+        # (verifie sur le millesime 2026-02-a — zero virgule et huit
+        # points-virgules dans l'en-tete de batiment_groupe.csv). DuckDB aurait
+        # rendu une colonne unique contenant la ligne entiere.
+        #
+        # Deviner d'apres les DONNEES reste exclu : un champ entre guillemets
+        # contenant une virgule suffit a faire deraper un sniffer, et la
+        # geometrie WKT de la BDNB en est pleine. L'en-tete, lui, ne contient
+        # que des noms de colonnes.
         con.execute(f"""
             CREATE OR REPLACE TEMP VIEW {alias} AS
             SELECT * FROM read_csv(
                 '{escaped}',
                 header = true, all_varchar = true,
-                delim = ',', quote = '"', escape = '"'
+                delim = '{delim}', quote = '"', escape = '"'
             )
         """)
+        _assert_split(con, alias, path, delim)
         found.add(alias)
     return found
+
+
+# Separateurs plausibles, du plus probable au moins probable pour cette source.
+DELIMITERS = (";", ",", "\t", "|")
+
+
+def _delimiter(path: Path) -> str:
+    """Separateur du fichier, lu dans son en-tete.
+
+    L'en-tete ne contient que des noms de colonnes : aucun guillemet, aucune
+    virgule decorative. C'est la seule ligne du fichier ou compter les
+    separateurs est sans risque.
+    """
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        header = handle.readline()
+
+    counts = {d: header.count(d) for d in DELIMITERS}
+    best = max(counts, key=counts.get)
+
+    if counts[best] == 0:
+        raise ValueError(
+            f"aucun separateur reconnu dans l'en-tete de {path.name} : "
+            f"{header[:120]!r}. Le format de l'export BDNB a peut-etre change."
+        )
+    return "\\t" if best == "\t" else best
+
+
+def _assert_split(con: duckdb.DuckDBPyConnection, alias: str, path: Path, delim: str) -> None:
+    """Verifie que le fichier a bien ete decoupe.
+
+    Une seule colonne lue signifie que le separateur ne correspond pas. Sans ce
+    controle, l'erreur qui suit parle d'une colonne manquante et envoie chercher
+    du cote du schema plutot que du dialecte.
+    """
+    colonnes = con.execute(f"DESCRIBE {alias}").fetchall()
+    if len(colonnes) > 1:
+        return
+
+    raise ValueError(
+        f"{path.name} n'a pas ete decoupe en colonnes avec le separateur "
+        f"« {delim} » : une seule colonne lue. L'export a probablement change "
+        "de dialecte."
+    )
 
 
 def _assert_minimum(available: set[str]) -> None:

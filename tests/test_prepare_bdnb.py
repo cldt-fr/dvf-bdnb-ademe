@@ -111,3 +111,63 @@ def test_le_rapport_expose_la_couverture(jeu: Path, tmp_path: Path) -> None:
     assert rapport["part_avec_geometrie"] == 100.0
     # Deux bâtiments sur trois portent une parcelle : BG1 a cédé la sienne à BG2.
     assert rapport["part_rattachee_parcelle"] == pytest.approx(66.7, abs=0.1)
+
+
+# --- Dialecte de l'export ----------------------------------------------------
+#
+# Le separateur etait code a la virgule. L'export BDNB utilise le point-virgule :
+# verifie sur le millesime 2026-02-a, l'en-tete de batiment_groupe.csv contient
+# zero virgule et huit points-virgules. DuckDB aurait rendu une colonne unique
+# contenant la ligne entiere, et l'erreur suivante aurait parle d'une colonne
+# manquante — envoyant chercher du cote du schema plutot que du dialecte.
+
+
+def test_le_separateur_est_lu_dans_l_entete(tmp_path: Path) -> None:
+    fichier = tmp_path / "batiment_groupe.csv"
+    fichier.write_text(
+        "geom_groupe;batiment_groupe_id;code_departement_insee\n"
+        '"MULTIPOLYGON (((848242.5 6563290.1, 848243.0 6563291.0)))";bg1;48\n',
+        encoding="utf-8",
+    )
+    assert bdnb._delimiter(fichier) == ";"
+
+
+def test_la_geometrie_pleine_de_virgules_ne_trompe_pas_la_detection(tmp_path: Path) -> None:
+    """C'est le piege : les DONNEES contiennent bien plus de virgules que de
+    points-virgules. Seul l'en-tete est fiable."""
+    fichier = tmp_path / "batiment_groupe.csv"
+    virgules = ", ".join(f"{i}.0 {i}.5" for i in range(50))
+    fichier.write_text(
+        "geom_groupe;batiment_groupe_id\n" f'"MULTIPOLYGON ((({virgules})))";bg1\n',
+        encoding="utf-8",
+    )
+    assert fichier.read_text(encoding="utf-8").count(",") > 40
+    assert bdnb._delimiter(fichier) == ";"
+
+
+def test_un_entete_sans_separateur_est_denonce(tmp_path: Path) -> None:
+    fichier = tmp_path / "batiment_groupe.csv"
+    fichier.write_text("colonneunique\nvaleur\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="aucun separateur reconnu"):
+        bdnb._delimiter(fichier)
+
+
+def test_un_fichier_en_point_virgule_est_lu_correctement(tmp_path: Path) -> None:
+    """Bout en bout : c'est ce que produit reellement l'archive BDNB."""
+    csv_dir = tmp_path / "csv"
+    csv_dir.mkdir()
+    (csv_dir / "batiment_groupe.csv").write_text(
+        "batiment_groupe_id;code_commune_insee;code_departement_insee;s_geom_groupe\n"
+        "bg1;48095;48;120.5\n"
+        "bg2;48095;48;80.0\n",
+        encoding="utf-8",
+    )
+
+    con = duckdb.connect()
+    trouves = bdnb._register(con, csv_dir)
+
+    assert "groupe" in trouves
+    colonnes = [c[0] for c in con.execute("DESCRIBE groupe").fetchall()]
+    assert "batiment_groupe_id" in colonnes
+    assert con.execute("SELECT count(*) FROM groupe").fetchone()[0] == 2
