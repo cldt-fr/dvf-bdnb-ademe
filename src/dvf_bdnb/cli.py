@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 
 from dvf_bdnb import fetch, sources as registry
-from dvf_bdnb.prepare import dpe as prepare_dpe, dvf as prepare_dvf
+from dvf_bdnb.prepare import bdnb as prepare_bdnb, dpe as prepare_dpe, dvf as prepare_dvf
 from dvf_bdnb.state import State, SourceState
 
 app = typer.Typer(
@@ -85,6 +85,22 @@ def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path) -> N
         typer.secho(f"  -> {destination}", fg=typer.colors.GREEN)
 
 
+def _prepare_bdnb(entry: registry.Source, departments: list[str], out: Path) -> None:
+    """L'archive fait ~39 Go pour une centaine de tables ; on n'en extrait que cinq."""
+    csv_dir = WORK / "bdnb" / "csv"
+    members = [f"./csv/{table}.csv" for table in prepare_bdnb.TABLES.values()]
+
+    if not (csv_dir / f"{prepare_bdnb.TABLES['groupe']}.csv").exists():
+        typer.echo("extraction des tables utiles depuis l'archive BDNB…")
+        found = fetch.extract_members(entry.url("csv_archive"), csv_dir, members)
+        typer.echo(f"  {len(found)} table(s) extraite(s)")
+
+    destination = out / "bdnb" / ("france.parquet" if not departments else f"dept-{departments[0]}.parquet")
+    report = prepare_bdnb.prepare(csv_dir, destination, departments=departments or None)
+    typer.echo(f"bdnb : {json.dumps(report, ensure_ascii=False)}")
+    typer.secho(f"  -> {destination}", fg=typer.colors.GREEN)
+
+
 def _probe_source(entry: registry.Source) -> fetch.RemoteInfo:
     """Marque de version d'une source, quelle que soit sa forme.
 
@@ -114,6 +130,9 @@ def prepare(
 
     if source == "dpe":
         _prepare_dpe(catalogue["dpe"], depts, out)
+        return
+    if source == "bdnb":
+        _prepare_bdnb(catalogue["bdnb"], depts, out)
         return
     if source != "dvf":
         typer.secho(f"source « {source} » pas encore implementee", fg=typer.colors.YELLOW)

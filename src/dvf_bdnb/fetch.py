@@ -15,6 +15,7 @@ avec double lecture concordante — un desaccord relance le tronçon, jamais les
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,6 +208,43 @@ def paginated_json(
             query = None
 
     return rows
+
+
+def extract_members(archive_url: str, destination: Path, members: list[str]) -> list[Path]:
+    """Extrait quelques membres d'une archive tar.gz distante, en un seul passage.
+
+    L'archive BDNB pèse ~39 Go et contient une centaine de tables ; on n'en veut
+    que cinq. On diffuse donc le flux dans `tar` plutôt que de tout écrire sur
+    disque pour ne garder qu'une fraction.
+
+    `--occurrence=1` laisse tar s'arrêter dès qu'il a trouvé chaque membre
+    demandé, au lieu de lire l'archive jusqu'au bout.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        "tar", "-xz", "--occurrence=1", "-C", str(destination),
+        "--strip-components=2", *members,
+    ]
+
+    with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
+        with client.stream("GET", archive_url) as response:
+            response.raise_for_status()
+            process = subprocess.Popen(command, stdin=subprocess.PIPE)
+            try:
+                for block in response.iter_bytes(4 * 1024 * 1024):
+                    process.stdin.write(block)
+            except BrokenPipeError:
+                # tar a trouve tout ce qu'on lui demandait et s'est arrete : ce
+                # n'est pas une erreur, c'est l'effet recherche.
+                pass
+            finally:
+                if process.stdin:
+                    process.stdin.close()
+                process.wait()
+
+    extracted = [destination / Path(m).name for m in members]
+    return [p for p in extracted if p.exists()]
 
 
 def sha256(path: Path) -> str:

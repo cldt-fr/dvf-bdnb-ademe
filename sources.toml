@@ -32,7 +32,9 @@ licence = "Licence Ouverte 2.0"
 # ATTENTION : cette source corrompt par intermittence sans erreur HTTP.
 # Le telechargement passe obligatoirement par la lecture double (fetch.py).
 file_url = "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_france/open_data_millesime_2026-02-a_france_pgdump.tar.gz"
-csv_url = "https://www.data.gouv.fr/api/1/datasets/r/"
+# Export CSV : une centaine de tables, dont cinq nous servent. DuckDB les lit
+# directement, sans passer par une restauration PostgreSQL de plusieurs heures.
+csv_archive_url = "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_france/open_data_millesime_2026-02-a_france_csv.tar.gz"
 cadence = "trois fois par an"
 format = "tar.gz"
 verify = "double-read"

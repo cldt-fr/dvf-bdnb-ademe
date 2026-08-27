@@ -122,9 +122,20 @@ C'est le cœur du projet : chaque traitement ci-dessous est un piège que le ré
 
 ### BDNB
 
-- **90 tables ramenées à une.** Le dump porte tout le modèle CSTB ; on projette une ligne par groupe
-  de bâtiments : époque de construction, matériaux, hauteur, niveaux, nombre et occupation des
-  logements, ascenseur, usage, classe énergétique représentative.
+- **90 tables ramenées à une.** On projette une ligne par groupe de bâtiments : époque de
+  construction, matériaux, hauteur, niveaux, nombre et occupation des logements, usage, classe
+  énergétique représentative. On consomme l'**export CSV**, que DuckDB lit directement — et on
+  n'extrait de l'archive que les cinq tables utiles, en un seul passage sur le flux, sans écrire les
+  39 Go sur disque.
+- **Une parcelle, un bâtiment.** Une parcelle porte souvent plusieurs constructions (cour,
+  dépendances, immeubles multiples). Sans arbitrage, une vente serait comptée autant de fois qu'il y
+  a de bâtiments sur son terrain. On retient la parcelle principale marquée par le CSTB d'abord,
+  puis, à défaut, le bâtiment le plus habité.
+- **Format de géométrie détecté, pas supposé.** Selon l'export, `geom_groupe` arrive en WKT ou en
+  WKB hexadécimal. Choisir au hasard produirait soit une erreur, soit — bien pire — une colonne
+  entièrement nulle sans le moindre message.
+- **Tables d'enrichissement facultatives.** L'absence du DPE représentatif ou de la BD TOPO est
+  signalée dans le rapport, pas fatale : le jeu se produit quand même.
 - **Nom de schéma résolu, jamais supposé.** Le dump crée un schéma nommé d'après le millésime
   (`bdnb_2026_02_a_open_data`), qui change à chaque livraison.
 - **Géométries en WGS 84**, le SRID étant détecté et non présumé.
@@ -187,7 +198,7 @@ dépôt porte le code et l'orchestration ; le calcul tourne sur un **runner auto
 | 1 | `check` — détection de nouvelle version sur les trois sources | ✅ |
 | 2 | `prepare --source dvf` | ✅ |
 | 3 | `prepare --source dpe` | ✅ |
-| 4 | `prepare --source bdnb` | à faire |
+| 4 | `prepare --source bdnb` | ✅ |
 | 5 | `publish` — Releases, manifeste, DDL | à faire |
 | 6 | Contrôles qualité **bloquants** | à faire |
 | 7 | En option : le jeu joint (§2.3) | à décider |
