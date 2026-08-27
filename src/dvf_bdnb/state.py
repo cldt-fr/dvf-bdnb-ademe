@@ -1,8 +1,17 @@
-"""Etat des millesimes deja traites.
+"""État des millésimes déjà traités.
 
-Aucun producteur ne publie de notification : la detection se fait en comparant
-l'empreinte d'une source a ce qu'on en connait. Cet etat est donc la memoire du
-pipeline, et il est versionne avec le code.
+Aucun producteur ne publie de notification : la détection se fait en comparant
+l'empreinte d'une source à ce qu'on en connaît. Cet état est donc la mémoire du
+pipeline.
+
+Il n'est **pas versionné** : un fichier d'état commité se salit à chaque essai
+local, entre en conflit dès que deux exécutions se croisent, et mélange les
+essais d'un développeur avec ce qu'a réellement publié la chaîne.
+
+À terme, la mémoire de référence sera le manifeste de la dernière Release
+publiée : il dit ce qui a été produit, il est déjà versionné par nature, et il
+ne peut pas diverger de la réalité. Ce fichier local n'est qu'un relais en
+attendant la phase 5.
 """
 
 from __future__ import annotations
