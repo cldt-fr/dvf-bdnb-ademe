@@ -103,7 +103,16 @@ a decouvrir seul.
 
 - **Reprojection en WGS 84.** L'ADEME publie les coordonnees dans le systeme metrique **local** de
   chaque territoire : Lambert 93 en metropole, UTM 20N aux Antilles, 22N en Guyane, 40S a La Reunion,
-  38S a Mayotte. Les traiter uniformement place les diagnostics ultramarins hors de leur commune.
+  38S a Mayotte.
+
+  Elle expose bien un champ `_geopoint` cense donner des coordonnees geographiques, **mais il est
+  faux en outre-mer** : il traite toutes les coordonnees comme du Lambert 93. Verifie sur la source
+  le 27/08/2026 — Saint-Paul de La Reunion y tombe a la latitude 56 (mer du Nord), et
+  Capesterre-Belle-Eau a la latitude 6 (golfe de Guinee). On reprojette donc soi-meme.
+
+  Second piege, dans la reprojection elle-meme : avec EPSG:4326, PROJ suit l'ordre d'axe officiel
+  (latitude, longitude). Sans `always_xy`, `ST_X` renvoie la latitude et tout le jeu sort de travers,
+  sans aucune erreur. Les deux pieges sont verrouilles par des tests.
 - **~250 colonnes ramenees a l'utile** : classes energie et GES, consommations, emissions, surface,
   type et periode de construction, adresse BAN, position, dates.
 - **Dedoublonnage des DPE remplaces** : `numero_dpe_remplace` chaine les revisions ; sans traitement,

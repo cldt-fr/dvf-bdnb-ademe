@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 
 from dvf_bdnb import fetch, sources as registry
-from dvf_bdnb.prepare import dvf as prepare_dvf
+from dvf_bdnb.prepare import dpe as prepare_dpe, dvf as prepare_dvf
 from dvf_bdnb.state import State, SourceState
 
 app = typer.Typer(
@@ -62,6 +62,29 @@ def check(
     raise typer.Exit(0 if something_new else 1)
 
 
+def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path) -> None:
+    """Un departement a la fois : l'API pagine, et un million de lignes en
+    memoire pour la France entiere n'aurait pas de sens."""
+    for dept in departments:
+        typer.echo(f"{dept} : telechargement…")
+        rows = fetch.paginated_json(
+            entry.url("api") + "/lines",
+            {
+                "size": 10000,
+                "select": ",".join(prepare_dpe.COLUMNS),
+                "sort": "numero_dpe",
+                "qs": f'code_departement_ban:"{dept}"',
+            },
+            on_page=lambda n: typer.echo(f"  {n} lignes lues", nl=False, err=True) or typer.echo("\r", nl=False, err=True),
+        )
+        typer.echo("")
+
+        destination = out / "dpe" / f"dept-{dept}.parquet"
+        report = prepare_dpe.prepare(rows, dept, destination)
+        typer.echo(f"{dept} : {json.dumps(report, ensure_ascii=False)}")
+        typer.secho(f"  -> {destination}", fg=typer.colors.GREEN)
+
+
 def _probe_source(entry: registry.Source) -> fetch.RemoteInfo:
     """Marque de version d'une source, quelle que soit sa forme.
 
@@ -86,13 +109,17 @@ def prepare(
     out: Path = typer.Option(Path("out"), help="Repertoire de sortie."),
 ) -> None:
     """Telecharge et prepare une source, departement par departement."""
+    catalogue = registry.registry()
+    depts = [d.strip() for d in departments.split(",") if d.strip()]
+
+    if source == "dpe":
+        _prepare_dpe(catalogue["dpe"], depts, out)
+        return
     if source != "dvf":
         typer.secho(f"source « {source} » pas encore implementee", fg=typer.colors.YELLOW)
         raise typer.Exit(2)
 
-    catalogue = registry.registry()
     entry = catalogue["dvf"]
-    depts = [d.strip() for d in departments.split(",") if d.strip()]
     year_list = [y.strip() for y in years.split(",") if y.strip()]
 
     for dept in depts:

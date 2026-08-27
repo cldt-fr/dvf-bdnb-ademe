@@ -180,6 +180,35 @@ def _fetch_range(client: httpx.Client, url: str, start: int, end: int) -> bytes 
     return response.content
 
 
+def paginated_json(
+    url: str,
+    params: dict[str, object],
+    *,
+    on_page: Callable[[int], None] | None = None,
+) -> list[dict]:
+    """Parcourt une API data-fair page par page.
+
+    La pagination profonde passe par l'URL , qui embarque deja tous les
+    parametres : on ne les repasse donc pas, sous peine de repartir du debut.
+    """
+    rows: list[dict] = []
+    next_url: str | None = url
+    query: dict[str, object] | None = params
+
+    with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
+        while next_url:
+            response = client.get(next_url, params=query)
+            response.raise_for_status()
+            payload = response.json()
+            rows.extend(payload.get("results", []))
+            if on_page:
+                on_page(len(rows))
+            next_url = payload.get("next")
+            query = None
+
+    return rows
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
