@@ -133,16 +133,14 @@ def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path, force: bool =
     if destination.exists() and not force:
         return "deja produit (--force pour refaire)"
 
-    pages = fetch.paginate(
+    scratch = WORK / "dpe" / dept
+    pages = fetch.download_csv_pages(
         entry.url("api") + "/lines",
-        {
-            "size": 10000,
-            "select": ",".join(prepare_dpe.COLUMNS),
-            "sort": "numero_dpe",
-            "qs": f'code_departement_ban:"{dept}"',
-        },
+        {"size": 10000, "select": ",".join(prepare_dpe.COLUMNS),
+         "qs": f'code_departement_ban:"{dept}"'},
+        scratch,
     )
-    report = prepare_dpe.prepare_stream(pages, dept, destination)
+    report = prepare_dpe.prepare_from_csv(pages, dept, destination)
     return f"{report['diagnostics']} diagnostics, {report['part_bien_positionnee']} % positionnes"
 
 

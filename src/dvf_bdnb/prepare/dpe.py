@@ -150,6 +150,72 @@ def prepare_stream(
             shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
+def prepare_from_csv(
+    pages: list[Path],
+    department: str,
+    destination: Path,
+    connection: duckdb.DuckDBPyConnection | None = None,
+) -> dict:
+    """Prepare un territoire depuis des pages CSV deja sur disque.
+
+    DuckDB les lit directement : la donnee ne repasse jamais par des objets
+    Python, ce qui evite a la fois le cout de conversion et la consommation
+    memoire.
+    """
+    srid = srid_for(department)  # leve tot si le territoire est inconnu
+    if not pages:
+        raise ValueError(f"aucun diagnostic pour le territoire {department}")
+
+    con = connection or duckdb.connect()
+    fichiers = ", ".join("'" + str(p).replace("'", "''") + "'" for p in pages)
+    con.execute(f"""
+        CREATE OR REPLACE TEMP VIEW csv_brut AS
+        SELECT * FROM read_csv(
+            [{fichiers}],
+            header = true, all_varchar = true,
+            delim = ',', quote = '"', escape = '"'
+        )
+    """)
+    _align_columns(con)
+    total = con.execute("SELECT count(*) FROM raw_rows").fetchone()[0]
+    return _transform(con, department, destination, srid, total)
+
+
+def _align_columns(con: duckdb.DuckDBPyConnection) -> None:
+    """Ramene les colonnes du CSV aux noms attendus.
+
+    L'export CSV de l'ADEME nomme les colonnes par leur LIBELLE D'ORIGINE, la ou
+    l'API JSON emploie la cle normalisee. Or plusieurs libelles contiennent une
+    espace la ou la cle a un tiret bas : `emission_ges_5_usages par_m2` contre
+    `emission_ges_5_usages_par_m2`. Rien ne le signale — la colonne parait
+    simplement absente.
+
+    On rapproche donc les noms en normalisant les separateurs, plutot que de
+    corriger au cas par cas : le jeu compte une dizaine de libelles dans ce cas,
+    et rien ne dit qu'il n'en apparaitra pas d'autres.
+    """
+    presentes = [row[0] for row in con.execute("DESCRIBE csv_brut").fetchall()]
+    index = {c.replace(" ", "_").replace("-", "_").lower(): c for c in presentes}
+
+    projections, absentes = [], []
+    for attendue in COLUMNS:
+        reelle = index.get(attendue.replace(" ", "_").lower())
+        if reelle is None:
+            absentes.append(attendue)
+            projections.append(f'NULL AS "{attendue}"')
+        else:
+            projections.append(f'"{reelle}" AS "{attendue}"')
+
+    if len(absentes) > len(COLUMNS) // 2:
+        raise ValueError(
+            "l'export ne contient presque aucune colonne attendue : "
+            + ", ".join(absentes[:5])
+            + ". Le format de la source a probablement change."
+        )
+
+    con.execute(f"CREATE OR REPLACE TEMP VIEW raw_rows AS SELECT {', '.join(projections)} FROM csv_brut")
+
+
 def prepare(
     rows: list[dict],
     department: str,

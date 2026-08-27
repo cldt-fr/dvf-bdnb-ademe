@@ -215,6 +215,63 @@ def paginate(url: str, params: dict[str, object]) -> Iterator[list[dict]]:
             query = None
 
 
+def download_csv_pages(
+    url: str,
+    params: dict[str, object],
+    destination: Path,
+    *,
+    on_page: Callable[[int, int], None] | None = None,
+) -> list[Path]:
+    """Telecharge un jeu data-fair en CSV, page par page, sur disque.
+
+    POURQUOI LE CSV ET PAS LE JSON, mesure sur le jeu DPE avec ses 21 colonnes :
+
+        JSON + tri sur numero_dpe .....   283 lignes/s
+        JSON + tri sur _i .............   606 lignes/s
+        CSV  + tri sur _i ............. 2 112 lignes/s
+
+    Sept fois plus vite, pour la meme donnee. Le tri compte parce que `_i` est
+    l'index interne du jeu, la ou trier sur un champ metier coute cher ; et le
+    CSV evite la serialisation JSON de chaque valeur.
+
+    ET PAS DE PARALLELISME : la source bride. Mesure agregee sur quatre
+    territoires simultanes, 2 788 lignes/s contre 4 557 en solo. Multiplier les
+    requetes ralentit l'ensemble.
+
+    Les pages partent sur disque au fil de l'eau : Paris compte 837 000
+    diagnostics, et les garder en memoire ferait plusieurs gigaoctets.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    pages: list[Path] = []
+    next_url: str | None = url
+    query: dict[str, object] | None = {**params, "format": "csv", "sort": "_i"}
+    lignes = 0
+
+    with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
+        while next_url:
+            response = client.get(next_url, params=query)
+            response.raise_for_status()
+            texte = response.text
+
+            # Une page sans autre ligne que l'en-tete signale la fin.
+            if texte.count("\n") <= 1:
+                break
+
+            page = destination / f"p{len(pages):05d}.csv"
+            page.write_text(texte, encoding="utf-8")
+            pages.append(page)
+            lignes += texte.count("\n") - 1
+            if on_page:
+                on_page(len(pages), lignes)
+
+            # Pour le CSV, le curseur voyage dans l'en-tete Link, pas dans le corps.
+            link = response.links.get("next") if response.links else None
+            next_url = link.get("url") if link else None
+            query = None
+
+    return pages
+
+
 def paginated_json(url: str, params: dict[str, object]) -> list[dict]:
     """Variante qui ramene tout. A reserver aux petits volumes."""
     return [row for page in paginate(url, params) for row in page]

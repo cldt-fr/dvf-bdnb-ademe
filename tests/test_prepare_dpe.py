@@ -157,3 +157,38 @@ def test_un_territoire_inconnu_leve_avant_tout_telechargement(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="inconnu"):
         dpe.prepare_stream(pages_qui_ne_doivent_pas_etre_lues(), "999", tmp_path / "o.parquet")
+
+
+def test_les_libelles_csv_sont_rapproches_des_cles(tmp_path: Path) -> None:
+    """L'export CSV de l'ADEME nomme les colonnes par leur LIBELLÉ D'ORIGINE.
+
+    L'API JSON, elle, emploie la clé normalisée. Plusieurs libellés contiennent
+    une espace là où la clé a un tiret bas — `emission_ges_5_usages par_m2`
+    contre `emission_ges_5_usages_par_m2`. Rien ne le signale : la colonne
+    paraît simplement absente, et la requête échoue plus loin.
+    """
+    page = tmp_path / "p00000.csv"
+    page.write_text(
+        'numero_dpe,etiquette_dpe,date_etablissement_dpe,code_departement_ban,'
+        '"emission_ges_5_usages par_m2"\n'   # espace, comme dans l'export réel
+        'X1,C,2024-01-01,33,50\n',
+        encoding="utf-8",
+    )
+
+    rapport = dpe.prepare_from_csv([page], "33", tmp_path / "out.parquet")
+    assert rapport["diagnostics"] == 1
+
+    produit = rows(tmp_path / "out.parquet")[0]
+    assert produit["ges_kg_m2"] == 50
+
+
+def test_un_export_meconnaissable_leve(tmp_path: Path) -> None:
+    """Si presque aucune colonne attendue n'est là, le format a changé.
+
+    Mieux vaut le dire que produire un jeu vidé de sa substance.
+    """
+    page = tmp_path / "p00000.csv"
+    page.write_text("colonne_a,colonne_b\n1,2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="format de la source"):
+        dpe.prepare_from_csv([page], "33", tmp_path / "out.parquet")
