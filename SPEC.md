@@ -16,7 +16,7 @@ avant de pouvoir s'en servir.
 
 | Jeu | Producteur | Volume brut | Cadence | Etat a la diffusion |
 |-----|-----------|-------------|---------|---------------------|
-| **DVF** | DGFiP | ~18 M mutations, fenetre glissante ~5 ans | ~2x/an | Sans coordonnees, avec doublons de lots, types en texte |
+| **DVF** | DGFiP, geolocalise par Etalab | ~18 M mutations, fenetre glissante ~5 ans | ~2x/an | Une ligne par LOT, tout en texte, un fichier par annee et par departement |
 | **BDNB** | CSTB | ~32 M batiments, 40,5 Go compresses | 3x/an | Dump de 90 tables, schema nomme par millesime |
 | **DPE** | ADEME | 15,5 M diagnostics depuis 07/2021 | mensuelle | ~250 colonnes, coordonnees en projections locales variables |
 
@@ -79,11 +79,16 @@ a decouvrir seul.
 
 ### DVF
 
-- **Geolocalisation.** DVF brut n'a pas de coordonnees : il porte des references cadastrales. On
-  joint le plan cadastral pour attacher un point a chaque mutation.
-- **Dedoublonnage.** Une mutation portant plusieurs lots apparait autant de fois qu'il y a de lots.
-  Comptee telle quelle, elle gonfle les volumes et fausse les medianes. On deduplique par reference
-  cadastrale.
+> **Deja fait par Etalab, ne pas le refaire** : la geolocalisation. `geo-dvf` publie `longitude` et
+> `latitude` sur chaque ligne, par annee et par departement, depuis 2021. C'est cette source qu'on
+> consomme — pas le DVF brut de la DGFiP.
+
+- **Dedoublonnage par `id_mutation`.** Une vente portant plusieurs lots ou plusieurs locaux apparait
+  sur autant de lignes. Comptee telle quelle, elle gonfle les volumes et fausse les medianes : le
+  prix indique est celui de la mutation ENTIERE, pas du lot de la ligne. On regroupe donc par
+  `id_mutation` en agregeant surfaces et pieces.
+- **Consolidation multi-annees.** `geo-dvf` publie un fichier par annee ET par departement. On
+  produit un jeu par departement couvrant toute la fenetre.
 - **Mutations inexploitables ecartees** : nature autre que « Vente » (echanges, expropriations,
   adjudications ne refletent pas un prix de marche), et mutations multi-biens dont l'ecart entre
   surface du lot et surface batie depasse 30 % — leur prix au m2 n'a pas de sens.
@@ -178,14 +183,14 @@ depot porte le code et l'orchestration ; le calcul tourne sur un **runner self-h
 Sondage des trois sources, comparaison a l'etat connu, code de sortie exploitable par un cron
 quotidien sur le runner self-hoste.
 
-### Phase 2 — `prepare --source dpe`
-La plus simple et la plus frequente : mensuelle, purement tabulaire, pas de jointure. Elle sert de
-banc d'essai a toute la chaine — reprojection par territoire, selection de colonnes, dedoublonnage
-des revisions, partitionnement, sortie Parquet et CSV, DDL.
+### Phase 2 — `prepare --source dvf`
+La plus utile, et la plus facile a eprouver : un departement peu peuple pese quelques centaines de
+kilo-octets, donc la chaine complete se teste en quelques secondes. Dedoublonnage par `id_mutation`,
+filtrage des mutations inexploitables, typage, prix au m2, consolidation multi-annees.
 
-### Phase 3 — `prepare --source dvf`
-La plus utile. Geolocalisation par le plan cadastral, dedoublonnage des lots, filtrage des mutations
-inexploitables, typage, prix au m2. C'est le jeu que le plus grand nombre attend.
+### Phase 3 — `prepare --source dpe`
+La plus frequente : mensuelle, purement tabulaire. Reprojection par territoire, selection de colonnes,
+dedoublonnage des revisions.
 
 ### Phase 4 — `prepare --source bdnb`
 La plus lourde : 40 Go a lire, 90 tables a projeter en une. C'est ici que le choix DuckDB paie, et

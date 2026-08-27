@@ -1,0 +1,38 @@
+# Registre declaratif des sources.
+#
+# Rien de ce qui varie d'un millesime a l'autre n'est code dans le programme :
+# une nouvelle annee DVF ou un changement d'URL se traite ici.
+
+[dvf]
+label = "Demandes de Valeurs Foncieres, geolocalisees par Etalab"
+producer = "DGFiP / Etalab"
+licence = "Licence Ouverte 2.0"
+# Un fichier par annee ET par departement. La geolocalisation est deja faite :
+# on ne consomme PAS le DVF brut de la DGFiP.
+index_url = "https://files.data.gouv.fr/geo-dvf/latest/csv/"
+# Fichier temoin pour la detection : un departement quelconque suffit a reperer
+# une republication, tous etant regeneres ensemble.
+probe_url = "https://files.data.gouv.fr/geo-dvf/latest/csv/2025/departements/01.csv.gz"
+file_url = "https://files.data.gouv.fr/geo-dvf/latest/csv/{year}/departements/{dept}.csv.gz"
+cadence = "semestrielle"
+format = "csv.gz"
+
+[dpe]
+label = "DPE logements existants (depuis juillet 2021)"
+producer = "ADEME"
+licence = "Licence Ouverte 2.0"
+api_url = "https://data.ademe.fr/data-fair/api/v1/datasets/meg-83tjwtg8dyz4vv7h1dqe"
+cadence = "mensuelle"
+format = "api"
+
+[bdnb]
+label = "Base de Donnees Nationale des Batiments"
+producer = "CSTB"
+licence = "Licence Ouverte 2.0"
+# ATTENTION : cette source corrompt par intermittence sans erreur HTTP.
+# Le telechargement passe obligatoirement par la lecture double (fetch.py).
+file_url = "https://open-data.s3.fr-par.scw.cloud/bdnb_millesime_2026-02-a/millesime_2026-02-a_france/open_data_millesime_2026-02-a_france_pgdump.tar.gz"
+csv_url = "https://www.data.gouv.fr/api/1/datasets/r/"
+cadence = "trois fois par an"
+format = "tar.gz"
+verify = "double-read"
