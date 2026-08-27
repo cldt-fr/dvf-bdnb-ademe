@@ -60,10 +60,14 @@ def test_le_prefixe_de_l_archive_est_indifferent(tmp_path: Path) -> None:
 
 
 def test_un_membre_corrompu_est_refuse_et_non_ecrit(tmp_path: Path) -> None:
-    """La source BDNB corrompt par intermittence ; mieux vaut rien que du faux."""
+    """Mieux vaut rien que du faux — mais le refus doit dire POURQUOI.
+
+    Un garde-fou qui dit seulement « non » fait chercher le defaut dans la
+    source alors qu'il peut etre dans le garde-fou lui-meme.
+    """
     flux = archive({"batiment_groupe.csv": b"\x00\x00\x00binaire"})
 
-    with pytest.raises(OSError, match="illisible"):
+    with pytest.raises(OSError, match="octets nuls"):
         fetch.extract_from_stream(flux, tmp_path, ["./csv/batiment_groupe.csv"])
 
     assert not (tmp_path / "batiment_groupe.csv").exists()
@@ -222,3 +226,25 @@ def test_une_source_sans_reprise_par_plage_est_denoncee(monkeypatch) -> None:
     lecteur = fetch._ResumableReader("https://exemple.invalid/a.tar.gz", len(corps))
     with pytest.raises(OSError, match="reprise par plage"):
         lecteur.read(-1)
+
+
+@pytest.mark.parametrize("separateur", [b",", b";", b"\t", b"|"])
+def test_le_dialecte_du_csv_n_est_pas_impose(tmp_path: Path, separateur: bytes) -> None:
+    """Exiger la virgule etait un pari sur le dialecte.
+
+    Un export en point-virgule aurait ete rejete comme « corrompu », et le
+    message aurait envoye chercher du cote de la source plutot que du code.
+    """
+    entete = separateur.join([b"id", b"valeur"]) + b"\n1" + separateur + b"a\n"
+    flux = archive({"batiment_groupe.csv": entete})
+
+    trouves = fetch.extract_from_stream(flux, tmp_path, ["./csv/batiment_groupe.csv"])
+
+    assert len(trouves) == 1
+
+
+def test_un_membre_vide_est_denonce_comme_tel(tmp_path: Path) -> None:
+    flux = archive({"batiment_groupe.csv": b""})
+
+    with pytest.raises(OSError, match="fichier vide"):
+        fetch.extract_from_stream(flux, tmp_path, ["./csv/batiment_groupe.csv"])

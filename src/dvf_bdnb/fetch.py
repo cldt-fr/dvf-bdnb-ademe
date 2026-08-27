@@ -428,29 +428,48 @@ def _wanted_names(members: list[str]) -> dict[str, str]:
     return {Path(m).name: m for m in members}
 
 
-def _looks_like_csv(path: Path) -> bool:
-    """Garde-fou minimal contre un membre sorti corrompu.
+# Separateurs admis. Exiger la virgule etait un pari sur le dialecte : un export
+# en point-virgule aurait ete rejete comme « corrompu », et le message d'erreur
+# aurait envoye chercher du cote de la source plutot que du garde-fou.
+SEPARATEURS = (b",", b";", b"\t", b"|")
+
+
+def _csv_rejection_reason(path: Path) -> str | None:
+    """Dit POURQUOI un membre extrait ne ressemble pas a du CSV, ou None s'il en est.
 
     La lecture double ne s'applique pas ici : un `tar.gz` se lit en flux, on ne
-    peut pas relire un tronçon deja depasse. On verifie donc ce qu'on peut — un
-    en-tete texte, separe par des virgules, sans octet nul. Une corruption plus
-    subtile ne sera vue qu'a la lecture DuckDB, qui echouera bruyamment.
+    peut pas relire un tronçon deja depasse. On verifie donc ce qu'on peut. Le
+    motif du refus est rendu explicite — un garde-fou qui dit seulement « non »
+    fait chercher le defaut dans la source alors qu'il peut etre dans le
+    garde-fou lui-meme.
     """
     try:
         with path.open("rb") as handle:
             head = handle.read(64 * 1024)
-    except OSError:
-        return False
-    if not head or b"\x00" in head:
-        return False
+    except OSError as error:
+        return f"illisible sur le disque ({error})"
+
+    if not head:
+        return "fichier vide"
+    if b"\x00" in head:
+        return "contient des octets nuls (donnees binaires, pas du texte)"
+
     first = head.split(b"\n", 1)[0]
-    if b"," not in first:
-        return False
     try:
-        first.decode("utf-8")
+        apercu = first[:120].decode("utf-8")
     except UnicodeDecodeError:
-        return False
-    return True
+        return f"en-tete non decodable en UTF-8 : {first[:80]!r}"
+
+    if not any(sep in first for sep in SEPARATEURS):
+        return (
+            "en-tete sans separateur reconnu (ni virgule, point-virgule, "
+            f"tabulation ou barre verticale) : {apercu!r}"
+        )
+    return None
+
+
+def _looks_like_csv(path: Path) -> bool:
+    return _csv_rejection_reason(path) is None
 
 
 def extract_from_stream(
@@ -492,11 +511,13 @@ def extract_from_stream(
                 while block := source.read(8 * 1024 * 1024):
                     handle.write(block)
 
-            if not _looks_like_csv(partial):
+            motif = _csv_rejection_reason(partial)
+            if motif is not None:
+                taille = partial.stat().st_size if partial.exists() else 0
                 partial.unlink(missing_ok=True)
                 raise OSError(
-                    f"« {name} » est sorti de l'archive illisible (en-tete non textuel). "
-                    "La source BDNB corrompt par intermittence : relancer l'extraction."
+                    f"« {name} » est sorti de l'archive inexploitable : {motif}. "
+                    f"({taille} octets ecrits, {entry.size} annonces par l'archive.)"
                 )
 
             partial.replace(target)
