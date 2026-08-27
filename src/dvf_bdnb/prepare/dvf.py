@@ -11,6 +11,11 @@ Ce qui est fait ici, et pourquoi :
   Echanges, expropriations et adjudications ne refletent pas un prix negocie.
 - **Typage** : tout arrive en texte dans le CSV. Le code commune corse `2A004`
   interdit de traiter les codes comme des entiers.
+- **Cle de vente stable** (`cle_vente`), calculee depuis le contenu de la vente.
+  `id_mutation` change d'une publication a l'autre : s'en servir comme cle
+  primaire fait redupliquer tout le jeu a chaque millesime.
+- **Fusion des sources** : la publication officielle prime sur l'archive
+  historique la ou les deux couvrent la meme annee.
 - **Prix au m2** calcule une fois pour toutes, et sa plausibilite signalee
   plutot que la ligne supprimee — c'est au consommateur de decider.
 
@@ -55,12 +60,36 @@ def prepare(sources: list[Path], destination: Path, connection: duckdb.DuckDBPyC
     # conclut qu'il n'y en a pas, et le premier nom de voie contenant une
     # virgule — « RTE D'AIGRE , LES CHATELETS » — fait exploser le decoupage
     # sur un autre fichier. geo-dvf est du CSV standard : on le lui dit.
+    #
+    # `union_by_name` : l'archive historique porte deux colonnes de plus que
+    # geo-dvf (`annee`, `logement`). Aligner par nom plutot que par position
+    # permet de melanger les deux sans les tordre.
+    # `filename` : sert a savoir de quelle source vient chaque ligne, donc
+    # laquelle doit primer quand les deux couvrent la meme annee.
     con.execute(f"""
-        CREATE OR REPLACE TEMP VIEW raw AS
-        SELECT * FROM read_csv(
+        CREATE OR REPLACE TEMP VIEW raw_toutes_sources AS
+        SELECT *, CASE WHEN filename LIKE '%historique%' THEN 0 ELSE 1 END AS _prio
+        FROM read_csv(
             [{files}],
             header = true, all_varchar = true,
-            delim = ',', quote = '"', escape = '"'
+            delim = ',', quote = '"', escape = '"',
+            union_by_name = true, filename = true
+        )
+    """)
+
+    # L'officiel prime sur l'historique la ou les deux se recouvrent.
+    #
+    # L'archive communautaire s'arrete a un millesime de 2023 : son annee 2022
+    # est tronquee (7 435 lignes en Lozere contre 9 728 chez Etalab) et elle
+    # ignore les corrections DVF posterieures. Filtrer les annees a la main
+    # serait fragile ; on laisse la source la plus recente gagner, vente par
+    # vente. Une vente absente de l'officiel — donc anterieure a sa fenetre —
+    # n'a que des lignes historiques dans sa partition, et survit.
+    con.execute("""
+        CREATE OR REPLACE TEMP VIEW raw AS
+        SELECT * FROM raw_toutes_sources
+        QUALIFY _prio = max(_prio) OVER (
+            PARTITION BY date_mutation, valeur_fonciere, code_commune
         )
     """)
 
@@ -70,29 +99,53 @@ def prepare(sources: list[Path], destination: Path, connection: duckdb.DuckDBPyC
     # lignes la preparation ecarte, seulement combien elle en regroupe.
     lignes_source = con.execute("SELECT count(*) FROM raw").fetchone()[0]
 
+    # GROUP BY sur id_mutation SEUL.
+    #
+    # Grouper sur l'ensemble des colonnes paraissait equivalent — il ne l'est
+    # pas. Une vente peut porter sur des parcelles situees dans des communes
+    # differentes : 213 des 11 706 mutations de la Lozere, soit 1,8 %. Inclure
+    # le nom de commune dans le groupe les redecoupe en autant de lignes, dont
+    # chacune repete le prix TOTAL de la vente. C'est exactement le defaut qu'on
+    # corrige chez DVF, reproduit a plus petite echelle.
+    #
+    # Les champs geographiques sont donc agreges : on retient ceux de la
+    # parcelle qui porte le plus de surface batie, et on expose le nombre de
+    # communes concernees.
     con.execute(f"""
         CREATE OR REPLACE TEMP VIEW mutations AS
         SELECT
             id_mutation,
-            CAST(date_mutation AS DATE)                        AS date_mutation,
-            CAST(strftime(CAST(date_mutation AS DATE), '%Y') AS SMALLINT) AS annee,
-            nature_mutation,
-            CAST(valeur_fonciere AS DOUBLE)                    AS valeur_fonciere,
-            code_commune,
-            nom_commune,
-            code_postal,
-            code_departement,
-            -- Une mutation peut porter sur plusieurs parcelles : on garde la
-            -- premiere par ordre stable, et leur nombre.
+            -- Identifiant STABLE d'une vente, calcule depuis son contenu.
+            --
+            -- `id_mutation` n'en est pas un : c'est un numero de sequence
+            -- reattribue a CHAQUE publication. Verifie en Lozere — les 9 457
+            -- lignes de 2021 portent un id different entre le millesime 2023 et
+            -- celui de 2025, avec un decalage constant de 1 927, alors que les
+            -- ventes sont les memes. Un import incremental cale sur id_mutation
+            -- redupliquerait donc tout le jeu a chaque millesime.
+            md5(
+                CAST(min(date_mutation) AS VARCHAR) || '|' ||
+                CAST(max(CAST(valeur_fonciere AS DOUBLE)) AS VARCHAR) || '|' ||
+                coalesce(array_to_string(
+                    list_sort(list_distinct(list(id_parcelle))), ','
+                ), '')
+            )                                                  AS _empreinte,
+            CAST(min(date_mutation) AS DATE)                   AS date_mutation,
+            CAST(strftime(CAST(min(date_mutation) AS DATE), '%Y') AS SMALLINT) AS annee,
+            min(nature_mutation)                               AS nature_mutation,
+            max(CAST(valeur_fonciere AS DOUBLE))               AS valeur_fonciere,
+            -- Localisation de la parcelle la plus batie, a defaut la premiere.
+            coalesce(arg_max(code_commune, CAST(surface_reelle_bati AS DOUBLE)), min(code_commune)) AS code_commune,
+            coalesce(arg_max(nom_commune, CAST(surface_reelle_bati AS DOUBLE)), min(nom_commune))   AS nom_commune,
+            coalesce(arg_max(code_postal, CAST(surface_reelle_bati AS DOUBLE)), min(code_postal))   AS code_postal,
+            min(code_departement)                              AS code_departement,
+            count(DISTINCT code_commune)                       AS nb_communes,
             min(id_parcelle)                                   AS id_parcelle,
             count(DISTINCT id_parcelle)                        AS nb_parcelles,
-            -- Les surfaces, elles, s'additionnent sur les lignes de la mutation.
             sum(CAST(surface_reelle_bati AS DOUBLE))           AS surface_bati,
             sum(CAST(surface_terrain AS DOUBLE))               AS surface_terrain,
             max(CAST(nombre_pieces_principales AS INTEGER))    AS nb_pieces,
             count(*)                                           AS nb_lignes,
-            -- Un type unique signale un bien homogene ; plusieurs types
-            -- signalent une mutation composite dont le prix au m2 est douteux.
             count(DISTINCT code_type_local)                    AS nb_types,
             min(CAST(code_type_local AS TINYINT))              AS code_type_local,
             min(type_local)                                    AS type_local,
@@ -101,7 +154,28 @@ def prepare(sources: list[Path], destination: Path, connection: duckdb.DuckDBPyC
         FROM raw
         WHERE nature_mutation = 'Vente'
           AND valeur_fonciere IS NOT NULL
-        GROUP BY ALL
+        GROUP BY id_mutation
+    """)
+
+    # L'empreinte seule n'est pas injective : deux logements d'une meme parcelle
+    # vendus le meme jour au meme prix sont deux ventes distinctes qui la
+    # partagent (17 cas sur 17 314 en Lozere, 0,1 %). Une cle primaire qui
+    # echoue une fois sur mille n'en est pas une, d'ou le rang.
+    #
+    # Le rang est ordonne sur le CONTENU, jamais sur id_mutation qui change
+    # d'une publication a l'autre — et il est ajoute a TOUTES les ventes, pas
+    # aux seules en collision : sinon l'apparition d'une vente jumelle
+    # changerait retroactivement la cle de celle qui existait deja.
+    con.execute("""
+        CREATE OR REPLACE TEMP VIEW mutations_clees AS
+        SELECT * EXCLUDE (_empreinte),
+               _empreinte || '-' || lpad(CAST(row_number() OVER (
+                   PARTITION BY _empreinte
+                   ORDER BY surface_bati NULLS LAST, surface_terrain NULLS LAST,
+                            nb_pieces NULLS LAST, code_type_local NULLS LAST,
+                            nb_lignes, nb_parcelles
+               ) AS VARCHAR), 2, '0') AS cle_vente
+        FROM mutations
     """)
 
     con.execute(f"""
@@ -120,8 +194,8 @@ def prepare(sources: list[Path], destination: Path, connection: duckdb.DuckDBPyC
                     WHEN valeur_fonciere / surface_bati > {MAX_PRICE_M2} THEN 'prix_m2_haut'
                     ELSE 'ok'
                 END AS qualite_prix_m2
-            FROM mutations
-            ORDER BY date_mutation, id_mutation
+            FROM mutations_clees
+            ORDER BY date_mutation, cle_vente
         ) TO '{destination}' (FORMAT parquet, COMPRESSION zstd)
     """)
 

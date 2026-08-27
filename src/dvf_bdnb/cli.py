@@ -10,7 +10,12 @@ import typer
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dvf_bdnb import departments as depts_module, fetch, publish as publisher, quality, sources as registry
-from dvf_bdnb.prepare import bdnb as prepare_bdnb, dpe as prepare_dpe, dvf as prepare_dvf
+from dvf_bdnb.prepare import (
+    bdnb as prepare_bdnb,
+    dpe as prepare_dpe,
+    dvf as prepare_dvf,
+    joint as prepare_joint,
+)
 from dvf_bdnb.state import State, SourceState
 
 app = typer.Typer(
@@ -65,12 +70,34 @@ def check(
     raise typer.Exit(0 if something_new else 1)
 
 
-def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: Path, force: bool = False) -> str:
+def _prepare_dvf_one(
+    entry: registry.Source,
+    dept: str,
+    years: list[str],
+    out: Path,
+    force: bool = False,
+    historique: registry.Source | None = None,
+) -> str:
     destination = out / "dvf" / f"dept-{dept}.parquet"
     if destination.exists() and not force:
         return "deja produit (--force pour refaire)"
 
     downloaded: list[Path] = []
+
+    # Annees anterieures a la fenetre glissante DVF. Le repertoire s'appelle
+    # « historique » : la preparation s'en sert pour faire primer l'officiel.
+    if historique is not None:
+        archive = WORK / "dvf" / "historique" / f"{dept}.csv"
+        if archive.exists():
+            downloaded.append(archive)
+        else:
+            url = fetch.datagouv_department_resources(historique.url("dataset")).get(dept)
+            if url:  # absent pour l'outre-mer : ce n'est pas une erreur
+                try:
+                    fetch.download(url, archive)
+                    downloaded.append(archive)
+                except Exception:  # noqa: BLE001
+                    pass
     for year in years:
         target = WORK / "dvf" / year / f"{dept}.csv.gz"
         if target.exists():
@@ -171,8 +198,27 @@ def _prepare_bdnb(entry: registry.Source, departments: list[str], out: Path) -> 
     members = [f"./csv/{table}.csv" for table in prepare_bdnb.TABLES.values()]
 
     if not (csv_dir / f"{prepare_bdnb.TABLES['groupe']}.csv").exists():
-        typer.echo("extraction des tables utiles depuis l'archive BDNB…")
-        found = fetch.extract_members(entry.url("csv_archive"), csv_dir, members)
+        typer.echo(
+            f"extraction de {len(members)} tables depuis l'archive BDNB (~40 Go a traverser).\n"
+            "L'archive n'est pas indexable : il faut la lire en flux, mais la lecture\n"
+            "s'arrete des que les tables voulues sont sorties."
+        )
+
+        def progression(lus: int, total: int | None) -> None:
+            part = f" / {total / 1e9:.1f} Go" if total else ""
+            typer.echo(f"\r  {lus / 1e9:6.2f} Go lus{part}", nl=False, err=True)
+
+        found = fetch.extract_members(
+            entry.url("csv_archive"), csv_dir, members,
+            on_progress=progression,
+            on_member=lambda nom: typer.secho(f"\r  extraite : {nom}", fg=typer.colors.GREEN),
+            on_retry=lambda n, err: typer.secho(
+                f"\r  tentative {n} interrompue ({err}) — reprise ; "
+                "les tables deja extraites sont conservees",
+                fg=typer.colors.YELLOW,
+            ),
+        )
+        typer.echo("")
         typer.echo(f"  {len(found)} table(s) extraite(s)")
 
     destination = out / "bdnb" / ("france.parquet" if not departments else f"dept-{departments[0]}.parquet")
@@ -208,6 +254,10 @@ def prepare(
     out: Path = typer.Option(Path("out"), help="Repertoire de sortie."),
     jobs: int = typer.Option(4, help="Departements traites en parallele."),
     force: bool = typer.Option(False, "--force", help="Refaire meme si le fichier existe deja."),
+    historique: bool = typer.Option(
+        True, "--historique/--sans-historique",
+        help="Ajouter les annees anterieures a la fenetre glissante DVF (2018-2020, metropole).",
+    ),
 ) -> None:
     """Telecharge et prepare une source, departement par departement.
 
@@ -233,7 +283,10 @@ def prepare(
 
     entry = catalogue["dvf"]
     year_list = [y.strip() for y in years.split(",") if y.strip()]
-    echecs = _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out, force))
+    archive = catalogue.get("dvf_historique") if historique else None
+    echecs = _run_parallel(
+        depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out, force, archive)
+    )
     if echecs and echecs == len(depts):
         # Tous en echec : ce n'est pas une source capricieuse, c'est une panne.
         raise typer.Exit(1)
@@ -296,6 +349,64 @@ def run(
     typer.secho(f"\n4. Publication — {millesime}", bold=True)
     publish(millesime=millesime, out=out, source=None,
             repo="cldt-fr/dvf-bdnb-ademe", dry_run=False, skip_checks=True)
+
+
+@app.command()
+def join(
+    departments: str = typer.Option("all", help="Codes departement, ou « all » (defaut)."),
+    out: Path = typer.Option(Path("out"), help="Repertoire contenant les jeux prepares."),
+    jobs: int = typer.Option(4, help="Departements traites en parallele."),
+    force: bool = typer.Option(False, "--force", help="Refaire meme si le fichier existe deja."),
+) -> None:
+    """Produit LE fichier qui contient tout : une ligne par vente, avec son
+    batiment et son diagnostic energetique.
+
+    Exige que les jeux DVF, BDNB et DPE aient deja ete prepares. La BDNB est le
+    pont : sans elle, aucune vente ne peut atteindre un diagnostic, faute de cle
+    commune entre une parcelle et un DPE.
+    """
+    if not (out / "dvf").exists():
+        typer.secho("le jeu DVF doit etre prepare d'abord.", fg=typer.colors.RED)
+        raise typer.Exit(2)
+
+    depts = (
+        [d.strip().upper() for d in departments.split(",") if d.strip()]
+        if departments.lower() not in ("all", "tous")
+        else sorted(p.stem.removeprefix("dept-") for p in (out / "dvf").glob("*.parquet"))
+    )
+
+    manquantes = [s for s in ("bdnb", "dpe") if not (out / s).exists()]
+    if manquantes:
+        typer.secho(
+            f"sources absentes : {', '.join(manquantes)}. Le jeu sera produit avec "
+            "les colonnes correspondantes vides.",
+            fg=typer.colors.YELLOW,
+        )
+
+    _run_parallel(depts, jobs, lambda d: _join_one(d, out, force))
+
+
+def _join_one(dept: str, out: Path, force: bool) -> str:
+    destination = out / "joint" / f"dept-{dept}.parquet"
+    if destination.exists() and not force:
+        return "deja produit (--force pour refaire)"
+
+    bdnb_path = out / "bdnb" / f"dept-{dept}.parquet"
+    if not bdnb_path.exists():
+        # La BDNB peut avoir ete preparee France entiere plutot que par departement.
+        france = out / "bdnb" / "france.parquet"
+        bdnb_path = france if france.exists() else bdnb_path
+
+    report = prepare_joint.prepare(
+        out / "dvf" / f"dept-{dept}.parquet",
+        destination,
+        bdnb_parquet=bdnb_path if bdnb_path.exists() else None,
+        dpe_parquet=out / "dpe" / f"dept-{dept}.parquet",
+    )
+    return (
+        f"{report['ventes']} ventes, {report['part_avec_batiment']} % avec batiment, "
+        f"{report['part_avec_classe_energie']} % avec classe energie"
+    )
 
 
 @app.command()

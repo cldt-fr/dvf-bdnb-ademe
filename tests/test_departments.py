@@ -102,4 +102,4 @@ def test_le_registre_est_livre_avec_le_paquet() -> None:
 
     embarque = Path(sources.__file__).with_name("sources.toml")
     assert embarque.exists(), "sources.toml doit etre dans src/dvf_bdnb/"
-    assert set(sources.registry()) == {"dvf", "dpe", "bdnb"}
+    assert set(sources.registry()) == {"dvf", "dvf_historique", "dpe", "bdnb"}

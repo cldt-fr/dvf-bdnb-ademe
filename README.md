@@ -111,16 +111,41 @@ moyenne.
 
 ---
 
-## Trois choses à savoir avant d'utiliser DVF
+## Quatre choses à savoir avant d'utiliser DVF
 
 **Une ligne = une vente.** Dans le fichier officiel, une vente portant sur plusieurs parcelles occupe
 plusieurs lignes, où le prix affiché est celui de la vente **entière**. Compter les lignes revient à
 quadrupler le nombre de ventes *et* les montants. Nous avons déjà regroupé : mesuré sur la Lozère,
-46 744 lignes correspondent à 11 706 ventes réelles.
+46 744 lignes correspondent à 11 493 ventes réelles.
 
-**L'historique n'est pas complet.** DVF est diffusé sur environ cinq années glissantes. Un bien
-absent du fichier n'est pas un bien jamais vendu — il a pu l'être avant le début de la période.
-Ne dites jamais à un vendeur que son bien n'a jamais changé de mains.
+Le piège est plus retors qu'il n'y paraît : une vente peut porter sur des parcelles situées dans
+**des communes différentes** (213 des 11 706 mutations de la Lozère, soit 1,8 %). Regrouper en
+gardant le nom de commune la redécoupe en autant de lignes, chacune répétant le prix total. Nous
+regroupons donc sur la vente seule, en retenant la localisation de la parcelle la plus bâtie et en
+exposant `nb_communes` pour que le cas reste visible.
+
+**`id_mutation` n'est pas un identifiant — utilisez `cle_vente`.** Le numéro fourni par DVF est une
+séquence **réattribuée à chaque publication**. Vérifié sur la Lozère : les 9 457 lignes de 2021
+portent un identifiant différent entre le millésime de 2023 et celui de 2025, décalé de 1 927,
+alors que ce sont exactement les mêmes ventes. Un import incrémental calé sur `id_mutation`
+reduplique donc tout le jeu à chaque millésime. Nous ajoutons `cle_vente`, calculée depuis le
+contenu de la vente (date, prix, parcelles) et donc stable d'une publication à l'autre : c'est
+elle qu'il faut prendre comme clé primaire.
+
+**L'historique remonte à 2018, pas au-delà.** DVF est diffusé sur cinq années **glissantes** : la
+DGFiP retire les années plus anciennes, et son propre fichier brut ne remonte pas plus loin que la
+version géolocalisée. Nous complétons 2021-2025 par une archive communautaire couvrant 2018-2020,
+validée contre la publication officielle sur leur année commune — 7 728 ventes appariées sur
+(date, prix, parcelle, commune), 5 écarts d'un côté, 0 de l'autre. Deux limites en découlent :
+cette archive ne couvre **que la métropole** (96 départements, Corse comprise), et là où les deux
+sources se recouvrent, c'est **l'officiel qui prime**, vente par vente.
+
+Avant 2018, il n'existe aucune source publique : les anciens millésimes de `files.data.gouv.fr`
+répondent bien `200` mais sont **vides**, et l'archive du web n'a conservé que les listings, pas
+les fichiers. Un bien absent du jeu n'est donc pas un bien jamais vendu — ne dites jamais à un
+vendeur que son bien n'a jamais changé de mains.
+
+Pour vous en tenir à la seule source officielle : `--sans-historique`.
 
 **Trois départements manquent.** Le Bas-Rhin, le Haut-Rhin et la Moselle relèvent du livre foncier,
 un système différent : DVF n'y publie rien. Mayotte non plus. Ce n'est pas une erreur de notre part.

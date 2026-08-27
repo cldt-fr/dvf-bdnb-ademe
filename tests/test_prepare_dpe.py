@@ -167,11 +167,22 @@ def test_les_libelles_csv_sont_rapproches_des_cles(tmp_path: Path) -> None:
     contre `emission_ges_5_usages_par_m2`. Rien ne le signale : la colonne
     paraît simplement absente, et la requête échoue plus loin.
     """
+    # Un export réaliste : toutes les colonnes, dont une portant son libellé
+    # d'origine avec une espace au lieu du tiret bas.
+    entete = [
+        c.replace("emission_ges_5_usages_par_m2", "emission_ges_5_usages par_m2")
+        for c in dpe.COLUMNS
+    ]
+    valeurs = {
+        "numero_dpe": "X1", "etiquette_dpe": "C",
+        "date_etablissement_dpe": "2024-01-01", "code_departement_ban": "33",
+        "emission_ges_5_usages par_m2": "50",
+    }
+
     page = tmp_path / "p00000.csv"
     page.write_text(
-        'numero_dpe,etiquette_dpe,date_etablissement_dpe,code_departement_ban,'
-        '"emission_ges_5_usages par_m2"\n'   # espace, comme dans l'export réel
-        'X1,C,2024-01-01,33,50\n',
+        ",".join(f'"{c}"' for c in entete) + "\n"
+        + ",".join(f'"{valeurs.get(c, "")}"' for c in entete) + "\n",
         encoding="utf-8",
     )
 

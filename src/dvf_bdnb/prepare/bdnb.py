@@ -186,12 +186,13 @@ def _geometry_expression(con: duckdb.DuckDBPyConnection, srid: int) -> str:
 def _optional_dpe(available: set[str]) -> tuple[str, str]:
     if "dpe" not in available:
         return (
-            "NULL::VARCHAR AS classe_dpe, NULL::VARCHAR AS classe_ges, "
-            "NULL::DOUBLE AS conso_kwh_m2,",
+            "NULL::VARCHAR AS identifiant_dpe, NULL::VARCHAR AS classe_dpe, "
+            "NULL::VARCHAR AS classe_ges, NULL::DOUBLE AS conso_kwh_m2,",
             "",
         )
     return (
-        """upper(d.classe_bilan_dpe)                       AS classe_dpe,
+        """d.identifiant_dpe                              AS identifiant_dpe,
+           upper(d.classe_bilan_dpe)                       AS classe_dpe,
            upper(d.classe_emission_ges)                    AS classe_ges,
            TRY_CAST(d.conso_5_usages_ep_m2 AS DOUBLE)      AS conso_kwh_m2,""",
         "LEFT JOIN dpe d ON d.batiment_groupe_id = g.batiment_groupe_id",

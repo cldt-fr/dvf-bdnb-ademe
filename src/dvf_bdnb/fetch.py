@@ -283,3 +283,216 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+class _StreamReader:
+    """Adapte un flux httpx (iterateur d'octets) a l'interface `read(n)` de tarfile."""
+
+    def __init__(self, blocks: Iterator[bytes], on_read: Callable[[int], None] | None = None):
+        self._blocks = blocks
+        self._buffer = b""
+        self._on_read = on_read
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            try:
+                block = next(self._blocks)
+            except StopIteration:
+                break
+            self._buffer += block
+            if self._on_read:
+                self._on_read(len(block))
+        if size < 0:
+            out, self._buffer = self._buffer, b""
+            return out
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+
+def _wanted_names(members: list[str]) -> dict[str, str]:
+    """Indexe les membres voulus par nom de fichier seul.
+
+    L'archive prefixe ses entrees (`./csv/x.csv`, `csv/x.csv`, selon le millesime).
+    Comparer les chemins entiers rend l'extraction dependante d'un detail de
+    fabrication de l'archive ; comparer les noms de fichier ne l'est pas.
+    """
+    return {Path(m).name: m for m in members}
+
+
+def _looks_like_csv(path: Path) -> bool:
+    """Garde-fou minimal contre un membre sorti corrompu.
+
+    La lecture double ne s'applique pas ici : un `tar.gz` se lit en flux, on ne
+    peut pas relire un tronçon deja depasse. On verifie donc ce qu'on peut — un
+    en-tete texte, separe par des virgules, sans octet nul. Une corruption plus
+    subtile ne sera vue qu'a la lecture DuckDB, qui echouera bruyamment.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(64 * 1024)
+    except OSError:
+        return False
+    if not head or b"\x00" in head:
+        return False
+    first = head.split(b"\n", 1)[0]
+    if b"," not in first:
+        return False
+    try:
+        first.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def extract_from_stream(
+    fileobj,
+    destination: Path,
+    members: list[str],
+    *,
+    on_member: Callable[[str], None] | None = None,
+) -> list[str]:
+    """Extrait `members` d'un tar.gz lu en flux, et s'arrete des qu'ils sont tous sortis.
+
+    L'archive BDNB fait une quarantaine de Go pour une centaine de tables dont
+    cinq nous servent. Un `tar.gz` n'etant pas indexable, il faut le traverser ;
+    en revanche rien n'oblige a le traverser en ENTIER — d'ou l'arret anticipe,
+    qui evite de tirer des dizaines de Go inutiles quand les tables voulues
+    sortent tot.
+    """
+    import tarfile
+
+    destination.mkdir(parents=True, exist_ok=True)
+    wanted = _wanted_names(members)
+    found: list[str] = []
+
+    with tarfile.open(fileobj=fileobj, mode="r|gz") as archive:
+        for entry in archive:
+            if not entry.isfile():
+                continue
+            name = Path(entry.name).name
+            if name not in wanted:
+                continue
+
+            source = archive.extractfile(entry)
+            if source is None:
+                continue
+
+            target = destination / name
+            partial = target.with_suffix(target.suffix + ".part")
+            with partial.open("wb") as handle:
+                while block := source.read(8 * 1024 * 1024):
+                    handle.write(block)
+
+            if not _looks_like_csv(partial):
+                partial.unlink(missing_ok=True)
+                raise OSError(
+                    f"« {name} » est sorti de l'archive illisible (en-tete non textuel). "
+                    "La source BDNB corrompt par intermittence : relancer l'extraction."
+                )
+
+            partial.replace(target)
+            found.append(wanted.pop(name))
+            if on_member:
+                on_member(name)
+
+            if not wanted:
+                break  # tout est sorti : inutile de tirer le reste de l'archive
+
+    return found
+
+
+def extract_members(
+    url: str,
+    destination: Path,
+    members: list[str],
+    *,
+    attempts: int = 3,
+    on_progress: Callable[[int, int | None], None] | None = None,
+    on_member: Callable[[str], None] | None = None,
+    on_retry: Callable[[int, str], None] | None = None,
+) -> list[str]:
+    """Telecharge une archive tar.gz en flux et en extrait les membres voulus.
+
+    Les membres deja presents ne sont pas re-extraits : une coupure reseau sur
+    40 Go est assez probable pour qu'une reprise doive repartir de ce qui a
+    deja ete obtenu, et non de zero.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+
+    remaining = [
+        m for m in members
+        if not ((destination / Path(m).name).exists() and _looks_like_csv(destination / Path(m).name))
+    ]
+    already = [m for m in members if m not in remaining]
+    if not remaining:
+        return already  # rien a faire : on ne sollicite meme pas le reseau
+
+    info = probe(url)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        read = 0
+
+        def note(size: int) -> None:
+            nonlocal read
+            read += size
+            if on_progress:
+                on_progress(read, info.size)
+
+        try:
+            with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
+                with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    reader = _StreamReader(response.iter_bytes(8 * 1024 * 1024), note)
+                    found = extract_from_stream(reader, destination, remaining, on_member=on_member)
+            return already + found
+        except Exception as error:  # reseau coupe, gzip tronque, membre corrompu
+            last_error = error
+            # Une reprise silencieuse est indefendable ici : le compteur d'octets
+            # repart a zero, et qui regarde croit a un ralentissement alors que
+            # des Go viennent d'etre retires.
+            if on_retry:
+                on_retry(attempt, str(error)[:140])
+            # Ce qui est deja sorti reste sur le disque : la tentative suivante
+            # ne redemande que le reste.
+            remaining = [
+                m for m in remaining
+                if not ((destination / Path(m).name).exists() and _looks_like_csv(destination / Path(m).name))
+            ]
+            already = [m for m in members if m not in remaining]
+            if not remaining:
+                return already
+            if attempt < attempts:
+                continue
+
+    raise OSError(
+        f"extraction de l'archive echouee apres {attempts} tentatives : {last_error}"
+    ) from last_error
+
+
+_RESSOURCES_CACHE: dict[str, dict[str, str]] = {}
+
+
+def datagouv_department_resources(dataset_url: str) -> dict[str, str]:
+    """URL de chaque ressource departementale d'un jeu data.gouv.
+
+    Mis en cache : la preparation traite jusqu'a une centaine de departements en
+    parallele, et rien ne justifie autant d'appels identiques a l'API.
+    """
+    import re
+
+    if dataset_url in _RESSOURCES_CACHE:
+        return _RESSOURCES_CACHE[dataset_url]
+
+    with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
+        response = client.get(dataset_url)
+        response.raise_for_status()
+        payload = response.json()
+
+    resources: dict[str, str] = {}
+    for item in payload.get("resources", []):
+        match = re.match(r"^(\d{2,3}|2A|2B)\s*-", item.get("title", ""))
+        if match:
+            resources[match.group(1)] = item["url"]
+
+    _RESSOURCES_CACHE[dataset_url] = resources
+    return resources

@@ -17,6 +17,33 @@ file_url = "https://files.data.gouv.fr/geo-dvf/latest/csv/{year}/departements/{d
 cadence = "semestrielle"
 format = "csv.gz"
 
+# Les annees anterieures a la fenetre glissante DVF.
+#
+# DVF est publie sur 5 ans GLISSANTS : la DGFiP retire les annees plus
+# anciennes, et son propre jeu brut ne remonte pas plus loin que geo-dvf. Les
+# anciens millesimes de files.data.gouv.fr repondent 200 mais sont vides, et
+# Wayback n'a archive que les listings, pas les fichiers.
+#
+# Cette compilation communautaire, figee en mai 2023, est la seule source
+# publique retrouvee pour 2018-2020. Elle a ete validee contre l'officiel sur
+# leur annee commune 2021 (Lozere) : 7 728 ventes appariees sur (date, prix,
+# parcelle, commune), 5 ecarts d'un cote, 0 de l'autre. C'est bien du geo-dvf.
+#
+# LIMITES, portees dans le jeu publie : metropole seulement (96 departements,
+# Corse comprise, pas d'outre-mer), et un millesime de 2023 — d'ou la regle
+# « l'officiel prime » des que les deux se recouvrent.
+[dvf_historique]
+label = "DVF geolocalisees, annees anterieures a la fenetre glissante"
+producer = "Compilation communautaire publiee sur data.gouv.fr"
+licence = "Licence Ouverte 2.0"
+# Chaque ressource porte son propre horodatage de depot : le chemin ne peut pas
+# etre devine, il faut interroger l'API. Verifie — un motif d'URL construit a
+# partir d'un departement renvoie 404 sur tous les autres.
+dataset_url = "https://www.data.gouv.fr/api/1/datasets/642205e1f2a0d0428a738699/"
+couverture = "2018-2020, metropole"
+cadence = "figee (mai 2023)"
+format = "csv"
+
 [dpe]
 label = "DPE logements existants (depuis juillet 2021)"
 producer = "ADEME"

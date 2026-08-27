@@ -112,6 +112,18 @@ def postgres_ddl(parquet: Path, table: str, connection: duckdb.DuckDBPyConnectio
         names.append(name)
         base = duck_type.split("(")[0].strip().upper()
         definitions.append(f"    {name:34} {TYPES.get(base, 'text')}")
+    # Cle primaire, quand le jeu en porte une STABLE.
+    #
+    # `id_mutation` n'en est pas une : c'est une sequence reattribuee a chaque
+    # publication, donc un import incremental cale dessus reduplique tout le jeu
+    # au millesime suivant. `cle_vente`, calculee depuis le contenu, tient — et
+    # la declarer ici est ce qui rend l'import incremental sur
+    # `ON CONFLICT DO UPDATE` possible.
+    if "cle_vente" in names:
+        definitions.append(f"    {'PRIMARY KEY (cle_vente)':34}")
+    elif "numero_dpe" in names:
+        definitions.append(f"    {'PRIMARY KEY (numero_dpe)':34}")
+
     lines.append(",\n".join(definitions))
     lines.append(");")
     lines.append("")
@@ -126,6 +138,13 @@ def postgres_ddl(parquet: Path, table: str, connection: duckdb.DuckDBPyConnectio
         "-- le parcours des INSERT individuels. Créer les index APRÈS le chargement",
         "-- divise encore le temps par deux sur un gros département.",
         f"-- zcat {table}-dept-XX.csv.gz | psql -c \"COPY {table} FROM STDIN (FORMAT csv, HEADER)\"",
+        "",
+        "-- Mise a jour incrementale, a la publication suivante : la cle primaire",
+        "-- etant stable d'un millesime a l'autre, une vente corrigee se met a jour",
+        "-- au lieu d'etre inseree en double.",
+        f"-- COPY {table}_import FROM STDIN (FORMAT csv, HEADER);",
+        f"-- INSERT INTO {table} SELECT * FROM {table}_import",
+        "--   ON CONFLICT (cle_vente) DO UPDATE SET valeur_fonciere = EXCLUDED.valeur_fonciere;",
         "",
     ]
     return "\n".join(lines)
