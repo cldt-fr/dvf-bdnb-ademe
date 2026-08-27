@@ -190,18 +190,16 @@ def _fetch_range(client: httpx.Client, url: str, start: int, end: int) -> bytes 
     return response.content
 
 
-def paginated_json(
-    url: str,
-    params: dict[str, object],
-    *,
-    on_page: Callable[[int], None] | None = None,
-) -> list[dict]:
-    """Parcourt une API data-fair page par page.
+def paginate(url: str, params: dict[str, object]) -> Iterator[list[dict]]:
+    """Parcourt une API data-fair page par page, sans tout garder en memoire.
 
-    La pagination profonde passe par l'URL , qui embarque deja tous les
+    Un generateur, et non une liste : Paris compte 837 000 diagnostics, et les
+    accumuler avant d'ecrire quoi que ce soit fait plusieurs gigaoctets d'objets
+    Python — de quoi mettre a genoux une petite machine d'integration.
+
+    La pagination profonde passe par l'URL `next`, qui embarque deja tous les
     parametres : on ne les repasse donc pas, sous peine de repartir du debut.
     """
-    rows: list[dict] = []
     next_url: str | None = url
     query: dict[str, object] | None = params
 
@@ -210,50 +208,16 @@ def paginated_json(
             response = client.get(next_url, params=query)
             response.raise_for_status()
             payload = response.json()
-            rows.extend(payload.get("results", []))
-            if on_page:
-                on_page(len(rows))
+            rows = payload.get("results", [])
+            if rows:
+                yield rows
             next_url = payload.get("next")
             query = None
 
-    return rows
 
-
-def extract_members(archive_url: str, destination: Path, members: list[str]) -> list[Path]:
-    """Extrait quelques membres d'une archive tar.gz distante, en un seul passage.
-
-    L'archive BDNB pèse ~39 Go et contient une centaine de tables ; on n'en veut
-    que cinq. On diffuse donc le flux dans `tar` plutôt que de tout écrire sur
-    disque pour ne garder qu'une fraction.
-
-    `--occurrence=1` laisse tar s'arrêter dès qu'il a trouvé chaque membre
-    demandé, au lieu de lire l'archive jusqu'au bout.
-    """
-    destination.mkdir(parents=True, exist_ok=True)
-
-    command = [
-        "tar", "-xz", "--occurrence=1", "-C", str(destination),
-        "--strip-components=2", *members,
-    ]
-
-    with httpx.Client(follow_redirects=True, timeout=TIMEOUT, http2=False) as client:
-        with client.stream("GET", archive_url) as response:
-            response.raise_for_status()
-            process = subprocess.Popen(command, stdin=subprocess.PIPE)
-            try:
-                for block in response.iter_bytes(4 * 1024 * 1024):
-                    process.stdin.write(block)
-            except BrokenPipeError:
-                # tar a trouve tout ce qu'on lui demandait et s'est arrete : ce
-                # n'est pas une erreur, c'est l'effet recherche.
-                pass
-            finally:
-                if process.stdin:
-                    process.stdin.close()
-                process.wait()
-
-    extracted = [destination / Path(m).name for m in members]
-    return [p for p in extracted if p.exists()]
+def paginated_json(url: str, params: dict[str, object]) -> list[dict]:
+    """Variante qui ramene tout. A reserver aux petits volumes."""
+    return [row for page in paginate(url, params) for row in page]
 
 
 def sha256(path: Path) -> str:

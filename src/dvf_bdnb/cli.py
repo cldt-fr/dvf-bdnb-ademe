@@ -91,7 +91,7 @@ def _prepare_dvf_one(entry: registry.Source, dept: str, years: list[str], out: P
     return f"{report['mutations']} mutations, {report['part_geolocalisee']} % geolocalisees"
 
 
-def _run_parallel(items: list[str], jobs: int, work) -> None:
+def _run_parallel(items: list[str], jobs: int, work) -> int:
     """Traite les territoires en parallele, sans qu'un echec emporte les autres.
 
     Sur un jeu complet, un territoire indisponible ne doit pas condamner les
@@ -117,12 +117,15 @@ def _run_parallel(items: list[str], jobs: int, work) -> None:
         typer.secho(f"{len(echecs)} en echec :", fg=typer.colors.RED, bold=True)
         for item, motif in echecs:
             typer.echo(f"  {item} : {motif}")
+    return len(echecs)
 
 
 def _prepare_dpe(entry: registry.Source, departments: list[str], out: Path, jobs: int = 2, force: bool = False) -> None:
     """Un territoire a la fois : l'API pagine, et charger la France entiere en
     memoire n'aurait pas de sens."""
-    _run_parallel(departments, jobs, lambda d: _prepare_dpe_one(entry, d, out, force))
+    echecs = _run_parallel(departments, jobs, lambda d: _prepare_dpe_one(entry, d, out, force))
+    if echecs and echecs == len(departments):
+        raise typer.Exit(1)
 
 
 def _prepare_dpe_one(entry: registry.Source, dept: str, out: Path, force: bool = False) -> str:
@@ -232,7 +235,10 @@ def prepare(
 
     entry = catalogue["dvf"]
     year_list = [y.strip() for y in years.split(",") if y.strip()]
-    _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out, force))
+    echecs = _run_parallel(depts, jobs, lambda d: _prepare_dvf_one(entry, d, year_list, out, force))
+    if echecs and echecs == len(depts):
+        # Tous en echec : ce n'est pas une source capricieuse, c'est une panne.
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -264,12 +270,19 @@ def run(
         try:
             prepare(source=source, departments="all", years="2021,2022,2023,2024,2025",
                     out=out, jobs=jobs, force=force)
-        except SystemExit:
-            continue
+        except SystemExit as stop:
+            if stop.code:
+                # Avaler cet echec menerait a verifier ce qui existe deja et a
+                # conclure que tout va bien, alors que la source n'a rien produit.
+                typer.secho(
+                    f"\nPreparation de « {source} » en echec. Chaine interrompue, rien n'a ete publie.",
+                    fg=typer.colors.RED, bold=True,
+                )
+                raise
 
     typer.secho("\n3. Controles qualite", bold=True)
     try:
-        verify(out=out, baseline=None)
+        verify(out=out, baseline=None, expect=",".join(demandees))
     except SystemExit as stop:
         if stop.code:
             typer.secho(
@@ -291,6 +304,7 @@ def run(
 def verify(
     out: Path = typer.Option(Path("out"), help="Repertoire contenant les jeux prepares."),
     baseline: Path = typer.Option(None, help="Manifeste du millesime precedent, pour la comparaison."),
+    expect: str = typer.Option(None, help="Sources qui DOIVENT avoir produit des donnees."),
 ) -> None:
     """Passe les jeux prepares au crible avant publication.
 
@@ -302,6 +316,18 @@ def verify(
         reference = quality.baseline_from_manifest(json.loads(baseline.read_text(encoding="utf-8")))
 
     findings = []
+
+    # Une source qui n'a rien produit est invisible d'un controle qui ne regarde
+    # que les fichiers existants : la chaine annoncerait « tout va bien » sur un
+    # echec total. On exige donc explicitement ce qui doit etre la.
+    produites = {source for _, source, _ in _iter_datasets(out)}
+    for attendue in [s.strip() for s in (expect or "").split(",") if s.strip()]:
+        if attendue not in produites:
+            findings.append(quality.Finding(
+                quality.Level.FAIL, "presence",
+                f"{attendue} : aucune donnee produite, alors que la source etait demandee",
+            ))
+
     for parquet, source, dept in _iter_datasets(out):
         rapport = quality.check_dataset(
             parquet, source, dept, baseline=reference.get(f"{source}/{dept}")
