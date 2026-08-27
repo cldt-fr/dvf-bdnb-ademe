@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from dvf_bdnb import fetch, sources as registry
+from dvf_bdnb import fetch, publish as publisher, sources as registry
 from dvf_bdnb.prepare import bdnb as prepare_bdnb, dpe as prepare_dpe, dvf as prepare_dvf
 from dvf_bdnb.state import State, SourceState
 
@@ -165,6 +165,111 @@ def prepare(
         report = prepare_dvf.prepare(downloaded, destination)
         typer.echo(f"{dept} : {json.dumps(report, ensure_ascii=False)}")
         typer.secho(f"  -> {destination}", fg=typer.colors.GREEN)
+
+
+@app.command()
+def publish(
+    millesime: str = typer.Option(..., help="Identifiant du millesime, ex. 2026-02-a."),
+    out: Path = typer.Option(Path("out"), help="Repertoire contenant les jeux prepares."),
+    source: str = typer.Option(None, help="Ne publier qu'une source."),
+    repo: str = typer.Option("cldt-fr/dvf-bdnb-ademe", help="Depot GitHub cible."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Tout preparer sans rien envoyer."),
+) -> None:
+    """Decline les jeux prepares en CSV + DDL, et les publie en Release."""
+    if not out.exists():
+        typer.secho(f"rien a publier : {out} n'existe pas", fg=typer.colors.RED)
+        raise typer.Exit(2)
+
+    sources = [source] if source else None
+    bundles = publisher.build(out, millesime, sources)
+
+    if not bundles:
+        typer.secho("aucun jeu prepare trouve", fg=typer.colors.RED)
+        raise typer.Exit(2)
+
+    manifest_path = publisher.write_manifest(bundles, millesime, out / "manifest.json")
+
+    for bundle in bundles:
+        parquets = [a for a in bundle.assets if a.path.suffix == ".parquet"]
+        total = sum(a.rows or 0 for a in parquets)
+        typer.echo(f"{bundle.source:5} : {len(parquets)} departement(s), {total:,} lignes".replace(",", " "))
+        typer.echo(f"        DDL : {bundle.ddl}")
+
+    typer.echo(f"manifeste : {manifest_path}")
+
+    if dry_run:
+        typer.secho("--dry-run : rien n'a ete envoye.", fg=typer.colors.YELLOW)
+        return
+
+    _upload(bundles, manifest_path, millesime, repo)
+
+
+def _upload(bundles: list, manifest_path: Path, millesime: str, repo: str) -> None:
+    """Cree la Release et y depose les fichiers.
+
+    On passe par `gh` plutot que par l'API : l'authentification, la reprise des
+    envois volumineux et les limites de taille y sont deja gerees.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("gh") is None:
+        typer.secho(
+            "gh est introuvable. Installer GitHub CLI, ou reprendre les fichiers "
+            f"de {manifest_path.parent} a la main.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+
+    files = [str(manifest_path)]
+    for bundle in bundles:
+        files += [str(a.path) for a in bundle.assets]
+        if bundle.ddl:
+            files.append(str(bundle.ddl))
+
+    existing = subprocess.run(
+        ["gh", "release", "view", millesime, "--repo", repo],
+        capture_output=True, text=True,
+    )
+    if existing.returncode != 0:
+        typer.echo(f"creation de la Release {millesime}…")
+        subprocess.run(
+            ["gh", "release", "create", millesime, "--repo", repo,
+             "--title", f"Millesime {millesime}",
+             "--notes", _release_notes(bundles, millesime)],
+            check=True,
+        )
+
+    typer.echo(f"envoi de {len(files)} fichier(s)…")
+    subprocess.run(
+        ["gh", "release", "upload", millesime, *files, "--repo", repo, "--clobber"],
+        check=True,
+    )
+    typer.secho(f"publie : https://github.com/{repo}/releases/tag/{millesime}", fg=typer.colors.GREEN)
+
+
+def _release_notes(bundles: list, millesime: str) -> str:
+    lignes = [
+        f"Jeux prepares du millesime **{millesime}**.",
+        "",
+        "| Source | Departements | Lignes |",
+        "|--------|--------------|--------|",
+    ]
+    for bundle in bundles:
+        parquets = [a for a in bundle.assets if a.path.suffix == ".parquet"]
+        total = sum(a.rows or 0 for a in parquets)
+        lignes.append(f"| {bundle.source} | {len(parquets)} | {total:,} |".replace(",", " "))
+    lignes += [
+        "",
+        "Chaque source est livree en Parquet (analyse directe) et en CSV compresse",
+        "accompagne de son DDL PostgreSQL (chargement par COPY).",
+        "",
+        "`manifest.json` porte les empreintes SHA-256 : verifier un telechargement",
+        "avant de s'en servir, la source amont n'etant pas toujours fiable.",
+        "",
+        "Donnees sous Licence Ouverte 2.0 (Etalab) — DGFiP, CSTB, ADEME.",
+    ]
+    return "\n".join(lignes)
 
 
 if __name__ == "__main__":

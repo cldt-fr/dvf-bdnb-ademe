@@ -42,8 +42,17 @@ Un jeu par source, **partitionné par département**, dans deux formats complém
 | **Parquet** | Analyse directe : DuckDB, Python, R, QGIS | Aucun — lecture sur place, même depuis une URL |
 | **CSV compressé + DDL** | Mise en base | `COPY` PostgreSQL, la voie la plus rapide en volume |
 
-Chaque Release embarque le `CREATE TABLE`, les index recommandés et un script de chargement. Passer
-de zéro à une base exploitable doit tenir en une commande par département, pas en une journée.
+Chaque Release embarque le `CREATE TABLE`, les index recommandés et la commande de chargement.
+Passer de zéro à une base exploitable doit tenir en une commande par département, pas en une journée.
+
+Le DDL est **dérivé du schéma Parquet**, jamais écrit à la main : une colonne ajoutée en amont se
+retrouve dans le `CREATE TABLE` sans que personne y pense, et les types ne peuvent pas diverger du
+fichier livré. Les index ne sont émis que pour les colonnes réellement présentes — un index sur une
+colonne absente ferait échouer tout le script.
+
+`manifest.json` porte les empreintes SHA-256 de chaque fichier. Ce n'est pas une précaution de
+principe : la source amont s'est révélée capable de renvoyer des octets faux sans erreur HTTP, et un
+consommateur doit pouvoir distinguer un fichier intact d'un fichier abîmé en transit.
 
 ```
 releases/2026-02-a/
@@ -199,7 +208,7 @@ dépôt porte le code et l'orchestration ; le calcul tourne sur un **runner auto
 | 2 | `prepare --source dvf` | ✅ |
 | 3 | `prepare --source dpe` | ✅ |
 | 4 | `prepare --source bdnb` | ✅ |
-| 5 | `publish` — Releases, manifeste, DDL | à faire |
+| 5 | `publish` — Releases, manifeste, DDL | ✅ |
 | 6 | Contrôles qualité **bloquants** | à faire |
 | 7 | En option : le jeu joint (§2.3) | à décider |
 
